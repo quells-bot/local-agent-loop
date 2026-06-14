@@ -272,3 +272,42 @@ impl Engine {
         Ok(true)
     }
 }
+
+impl Engine {
+    /// Spawn the driver and activity-worker loops as background tokio tasks and
+    /// return a shared handle. Use the `process_one_*` methods directly in tests
+    /// for deterministic stepping.
+    pub fn start(self) -> Arc<Engine> {
+        let engine = Arc::new(self);
+
+        let driver = engine.clone();
+        tokio::spawn(async move {
+            loop {
+                match driver.process_one_runnable().await {
+                    Ok(true) => {}
+                    Ok(false) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Err(err) => {
+                        eprintln!("driver error: {err:#}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        });
+
+        let worker = engine.clone();
+        tokio::spawn(async move {
+            loop {
+                match worker.process_one_activity().await {
+                    Ok(true) => {}
+                    Ok(false) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Err(err) => {
+                        eprintln!("worker error: {err:#}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        });
+
+        engine
+    }
+}
