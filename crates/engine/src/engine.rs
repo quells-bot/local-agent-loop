@@ -127,3 +127,91 @@ impl Engine {
         Ok(Handle { run_id, workflow_id: opts.id, history: self.history.clone() })
     }
 }
+
+use std::collections::HashSet;
+
+impl Engine {
+    /// Process one runnable workflow: cold-replay, persist newly-emitted commands,
+    /// update status, fire the observer on terminal (spec §5.1). Returns false if
+    /// nothing was runnable.
+    pub async fn process_one_runnable(&self) -> anyhow::Result<bool> {
+        let Some(run_id) = self.queue.next_runnable().await? else {
+            return Ok(false);
+        };
+        let meta = self
+            .history
+            .load_run(&run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("runnable run {run_id} has no execution row"))?;
+
+        let stored = self.history.read_history(&run_id).await?;
+        let events: Vec<workflow::Event> = stored.into_iter().map(|s| s.event).collect();
+        let recorded: HashSet<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                workflow::Event::ActivityScheduled { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .collect();
+
+        let info = workflow::Info {
+            execution: workflow::Execution {
+                workflow_id: meta.workflow_id.clone(),
+                run_id: run_id.clone(),
+            },
+            parent: None,
+            workflow_type: meta.workflow_type.clone(),
+        };
+        let replay = self
+            .workflows
+            .get(&meta.workflow_type)
+            .ok_or_else(|| anyhow::anyhow!("unregistered workflow {}", meta.workflow_type))?
+            .clone();
+
+        let outcome = replay(info, &events)
+            .map_err(|e| anyhow::anyhow!("nondeterminism in {}: {e}", meta.workflow_type))?;
+
+        // Persist only commands not already recorded in history.
+        let mut new_events = Vec::new();
+        let mut new_tasks = Vec::new();
+        for cmd in &outcome.commands {
+            let workflow::Command::ScheduleActivity { seq, activity_type, input, retry } = cmd;
+            if recorded.contains(seq) {
+                continue;
+            }
+            new_events.push(workflow::Event::ActivityScheduled {
+                seq: *seq,
+                activity_type: activity_type.clone(),
+                input: input.clone(),
+                retry: retry.clone(),
+            });
+            new_tasks.push(NewActivityTask {
+                seq: *seq as i64,
+                activity_type: activity_type.clone(),
+                input: input.clone(),
+                next_run_at: 0,
+            });
+        }
+
+        let (status, result) = match &outcome.completion {
+            Some(Ok(bytes)) => (ExecStatus::Completed, Some(bytes.clone())),
+            Some(Err(err)) => (ExecStatus::Failed, Some(serde_json::to_vec(err)?)),
+            None => (ExecStatus::Running, None),
+        };
+
+        let commit = TurnCommit { events: new_events, new_tasks, status, result: result.clone() };
+        self.history.commit_turn(&run_id, &commit).await?;
+
+        if status != ExecStatus::Running {
+            if let Some(obs) = &self.observer {
+                obs(RunCompleted {
+                    run_id: run_id.clone(),
+                    workflow_id: meta.workflow_id,
+                    status,
+                    result,
+                });
+            }
+        }
+        Ok(true)
+    }
+}
