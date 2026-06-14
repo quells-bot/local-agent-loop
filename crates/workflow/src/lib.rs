@@ -1,1 +1,6 @@
 //! Workflow-authoring surface + replay protocol (mirrors Go SDK `workflow`).
+
+pub use activity::Execution; // re-export so workflow::Execution exists (spec §9)
+
+mod info;
+pub use info::Info;
