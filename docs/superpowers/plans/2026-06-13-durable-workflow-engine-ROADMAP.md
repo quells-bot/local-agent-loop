@@ -139,9 +139,11 @@ pub struct Error { pub message: String }      // workflow failure
 pub struct Context { /* Rc<ContextInner>; minimal in 1a, replay state added in 1b */ }
 //   info() -> &Info  (1a);  activity::<A>(input) -> ActivityFuture, now(), random() (1b)
 
-#[async_trait] pub trait Definition: 'static {
-    type Input:  Serialize + DeserializeOwned + Send;
-    type Output: Serialize + DeserializeOwned + Send;
+// `?Send`: workflow futures hold Rc/RefCell (single-threaded loop), so they are
+// NOT Send. Associated types are `'static` (not Send — values never cross threads).
+#[async_trait(?Send)] pub trait Definition: 'static {
+    type Input:  Serialize + DeserializeOwned + 'static;
+    type Output: Serialize + DeserializeOwned + 'static;
     const TYPE: &'static str;
     async fn run(ctx: Context, input: Self::Input) -> Result<Self::Output, Error>;
 }
