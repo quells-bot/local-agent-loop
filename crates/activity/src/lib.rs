@@ -2,3 +2,6 @@
 
 mod execution;
 pub use execution::Execution;
+
+mod error;
+pub use error::Error;
