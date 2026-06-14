@@ -10,6 +10,9 @@ pub struct WorkflowState {
     ctx: Context,
     // Output is the JSON-encoded workflow result. !Send by construction.
     main: Pin<Box<dyn Future<Output = Result<Vec<u8>, crate::Error>>>>,
+    // Detached spawned branches, polled every turn in creation order (spec §4.4).
+    // `None` once a branch has completed (a completed future must not be re-polled).
+    spawned: Vec<Option<Pin<Box<dyn Future<Output = ()>>>>>,
 }
 
 impl WorkflowState {
@@ -21,18 +24,58 @@ impl WorkflowState {
             let out = W::run(run_ctx, input).await?;
             serde_json::to_vec(&out).map_err(|e| crate::Error::new(e.to_string()))
         });
-        Self { ctx, main }
+        Self { ctx, main, spawned: Vec::new() }
     }
 
     pub fn context(&self) -> &Context {
         &self.ctx
     }
 
-    /// Poll the workflow once with a no-op waker (spec §4.4 single poll/turn).
+    /// Drive `main` and every live spawned branch to quiescence for this turn:
+    /// re-poll until nothing makes progress (no Ready transition, no new command, no
+    /// new spawn). No new event is applied here — the caller has already applied at
+    /// most one (spec §4.1) — so determinism is preserved while detached branches and
+    /// resolved `SpawnHandle`s still get observed within the same turn.
     pub fn poll_turn(&mut self) -> Poll<Result<Vec<u8>, crate::Error>> {
         let waker = futures::task::noop_waker();
         let mut tcx = TaskContext::from_waker(&waker);
-        self.main.as_mut().poll(&mut tcx)
+        loop {
+            let mut progressed = false;
+            let before_cmds = self.ctx.commands_len();
+
+            if let Poll::Ready(r) = self.main.as_mut().poll(&mut tcx) {
+                return Poll::Ready(r);
+            }
+
+            // Absorb spawns created by `main` this iteration (creation order).
+            for fut in self.ctx.drain_new_spawns() {
+                self.spawned.push(Some(fut));
+                progressed = true;
+            }
+
+            // Poll each live spawned branch once.
+            for slot in self.spawned.iter_mut() {
+                if let Some(fut) = slot.as_mut() {
+                    if fut.as_mut().poll(&mut tcx).is_ready() {
+                        *slot = None; // completed — do not poll again
+                        progressed = true;
+                    }
+                }
+            }
+
+            // Absorb spawns created by spawned branches this iteration.
+            for fut in self.ctx.drain_new_spawns() {
+                self.spawned.push(Some(fut));
+                progressed = true;
+            }
+
+            if self.ctx.commands_len() != before_cmds {
+                progressed = true;
+            }
+            if !progressed {
+                return Poll::Pending;
+            }
+        }
     }
 
     pub fn drain_commands(&self) -> Vec<Command> {

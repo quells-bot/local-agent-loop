@@ -1,5 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -14,6 +16,8 @@ pub(crate) struct ContextInner {
     pub(crate) scheduled: RefCell<HashSet<u64>>,              // seqs emitted this life
     pub(crate) commands: RefCell<Vec<Command>>,               // emitted this turn
     pub(crate) fired: RefCell<HashSet<u64>>,                   // timer seqs fired (no payload)
+    // Futures spawned this turn, awaiting absorption by WorkflowState (spec §4.4).
+    pub(crate) new_spawns: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
 }
 
 #[derive(Clone)]
@@ -31,6 +35,7 @@ impl Context {
                 scheduled: RefCell::new(HashSet::new()),
                 commands: RefCell::new(Vec::new()),
                 fired: RefCell::new(HashSet::new()),
+                new_spawns: RefCell::new(Vec::new()),
             }),
         }
     }
@@ -74,6 +79,37 @@ impl Context {
     /// Driver drains commands emitted during the poll it just ran.
     pub fn drain_commands(&self) -> Vec<Command> {
         self.inner.commands.borrow_mut().drain(..).collect()
+    }
+
+    /// Spawn a detached branch (the `workflow.Go` analog, spec §4.4). The branch is
+    /// polled every turn in creation order by `WorkflowState`; it allocates `seq`s
+    /// from the shared counter exactly like inline code, so replay is deterministic.
+    /// Returns an awaitable handle for its output. Allocates no command and no `seq`
+    /// for the spawn itself.
+    pub fn spawn<F, T>(&self, fut: F) -> crate::SpawnHandle<T>
+    where
+        F: Future<Output = T> + 'static,
+        T: 'static,
+    {
+        let slot = std::rc::Rc::new(RefCell::new(None));
+        let writer = slot.clone();
+        let wrapped: Pin<Box<dyn Future<Output = ()>>> = Box::pin(async move {
+            let v = fut.await;
+            *writer.borrow_mut() = Some(v);
+        });
+        self.inner.new_spawns.borrow_mut().push(wrapped);
+        crate::SpawnHandle { slot }
+    }
+
+    /// WorkflowState drains freshly-spawned futures into its ordered poll list.
+    pub(crate) fn drain_new_spawns(&self) -> Vec<Pin<Box<dyn Future<Output = ()>>>> {
+        self.inner.new_spawns.borrow_mut().drain(..).collect()
+    }
+
+    /// Number of commands buffered (not drained). Used by `poll_turn` to detect that
+    /// a future made progress (emitted a command) during a quiescence iteration.
+    pub fn commands_len(&self) -> usize {
+        self.inner.commands.borrow().len()
     }
 }
 

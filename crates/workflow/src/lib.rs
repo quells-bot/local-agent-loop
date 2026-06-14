@@ -26,6 +26,9 @@ pub use context::Context;
 mod future;
 pub use future::{ActivityFuture, TimerFuture};
 
+mod spawn;
+pub use spawn::SpawnHandle;
+
 mod def;
 pub use def::Definition;
 

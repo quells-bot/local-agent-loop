@@ -313,4 +313,46 @@ mod tests {
         assert_eq!(err.seq, 0);
         assert!(err.detail.contains("timer"));
     }
+
+    // Workflow that spawns a detached branch running one activity, then awaits it.
+    // Exercises the ordered scheduler: the spawned task is polled though `main`
+    // never polls it directly.
+    struct Detached;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for Detached {
+        type Input = ();
+        type Output = i64;
+        const TYPE: &'static str = "Detached";
+        async fn run(ctx: Context, _i: ()) -> Result<i64, Error> {
+            let ctx2 = ctx.clone();
+            let h = ctx.spawn(async move { ctx2.activity::<Add>((3, 4)).await.unwrap() });
+            let v = h.await;
+            Ok(v)
+        }
+    }
+
+    #[test]
+    fn replays_spawned_branch() {
+        let info = Info {
+            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            parent: None,
+            workflow_type: "Detached".into(),
+        };
+        let h = vec![
+            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
+            // The spawned branch's activity is the first (and only) seq allocated.
+            Event::ActivityScheduled {
+                seq: 0,
+                activity_type: "Add".into(),
+                input: add_input(3, 4),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityCompleted { seq: 0, output: serde_json::to_vec(&7i64).unwrap() },
+        ];
+        let outcome = cold_replay::<Detached>(info, &h).unwrap();
+        let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(out, 7);
+        assert_eq!(outcome.commands.len(), 1);
+        assert!(matches!(&outcome.commands[0], Command::ScheduleActivity { seq: 0, .. }));
+    }
 }
