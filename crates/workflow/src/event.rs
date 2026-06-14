@@ -1,7 +1,7 @@
 use crate::RetryPolicy;
 use serde::{Deserialize, Serialize};
 
-/// One row of history (spec §11). Pass 2 adds TimerFired; Pass 3 SignalReceived;
+/// One row of history (spec §11). Pass 3 adds SignalReceived;
 /// Pass 4 ChildCompleted; WorkflowCancelRequested is reserved.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
@@ -52,6 +52,8 @@ mod tests {
             Event::ActivityFailed { seq: 3, error: activity::Error::fatal("x") }.kind(),
             "ActivityFailed"
         );
+        assert_eq!(Event::TimerStarted { seq: 0, duration_ms: 500 }.kind(), "TimerStarted");
+        assert_eq!(Event::TimerFired { seq: 0 }.kind(), "TimerFired");
     }
 
     #[test]
