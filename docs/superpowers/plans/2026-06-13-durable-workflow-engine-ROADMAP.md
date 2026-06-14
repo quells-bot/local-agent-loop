@@ -139,9 +139,11 @@ pub struct Error { pub message: String }      // workflow failure
 pub struct Context { /* Rc<ContextInner>; minimal in 1a, replay state added in 1b */ }
 //   info() -> &Info  (1a);  activity::<A>(input) -> ActivityFuture, now(), random() (1b)
 
-#[async_trait] pub trait Definition: 'static {
-    type Input:  Serialize + DeserializeOwned + Send;
-    type Output: Serialize + DeserializeOwned + Send;
+// `?Send`: workflow futures hold Rc/RefCell (single-threaded loop), so they are
+// NOT Send. Associated types are `'static` (not Send — values never cross threads).
+#[async_trait(?Send)] pub trait Definition: 'static {
+    type Input:  Serialize + DeserializeOwned + 'static;
+    type Output: Serialize + DeserializeOwned + 'static;
     const TYPE: &'static str;
     async fn run(ctx: Context, input: Self::Input) -> Result<Self::Output, Error>;
 }
@@ -182,10 +184,10 @@ chunk **1c**.)
 
 | Chunk | Title | Spec refs | Plan file | Status |
 | --- | --- | --- | --- | --- |
-| 1a | Workspace + protocol types | §3, §9, §10 | `2026-06-13-pass-1a-workspace-and-protocol-types.md` | planned |
-| 1b | Replay core (pure) | §3, §4, §12 | `2026-06-13-pass-1b-replay-core.md` | planned |
-| 1c | Backend traits + SQLite persist | §5, §11, §15 | `2026-06-13-pass-1c-persist-and-traits.md` | planned |
-| 1d | Driver + workers + start + observer | §5, §6.1(start), §7, §8 | `2026-06-13-pass-1d-driver-and-workers.md` | planned |
+| 1a | Workspace + protocol types | §3, §9, §10 | `archive/2026-06-13-pass-1a-workspace-and-protocol-types.md` | done |
+| 1b | Replay core (pure) | §3, §4, §12 | `archive/2026-06-13-pass-1b-replay-core.md` | done |
+| 1c | Backend traits + SQLite persist | §5, §11, §15 | `archive/2026-06-13-pass-1c-persist-and-traits.md` | done |
+| 1d | Driver + workers + start + observer | §5, §6.1(start), §7, §8 | `archive/2026-06-13-pass-1d-driver-and-workers.md` | done |
 | 2a | Timers (`sleep`/`timer` + service) | §4, §5.3 | _(JIT)_ | not yet authored |
 | 2b | Combinators + spawn scheduler | §4.2, §4.4 | _(JIT)_ | not yet authored |
 | 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | _(JIT)_ | not yet authored |

@@ -1,0 +1,309 @@
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::de::DeserializeOwned;
+
+use crate::{ExecStatus, History, NewActivityTask, TaskQueue, TurnCommit};
+
+/// Options for starting a workflow (spec §7.1). `id` is the dedup key.
+#[derive(Default)]
+pub struct StartOptions {
+    pub id: String,
+}
+
+/// Emitted to the completion observer after a turn drives a run terminal (spec §7.3).
+#[derive(Debug, Clone)]
+pub struct RunCompleted {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub status: ExecStatus,
+    pub result: Option<Vec<u8>>,
+}
+
+type ReplayFn = Arc<
+    dyn Fn(workflow::Info, &[workflow::Event]) -> Result<workflow::ReplayOutcome, workflow::Nondeterminism>
+        + Send
+        + Sync,
+>;
+type RunnerFn = Arc<
+    dyn Fn(activity::Context, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, activity::Error>> + Send>>
+        + Send
+        + Sync,
+>;
+type Observer = Arc<dyn Fn(RunCompleted) + Send + Sync>;
+
+pub struct Engine {
+    history: Arc<dyn History>,
+    queue: Arc<dyn TaskQueue>,
+    workflows: HashMap<String, ReplayFn>,
+    activities: HashMap<String, RunnerFn>,
+    observer: Option<Observer>,
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+}
+
+impl Engine {
+    pub fn new(history: Arc<dyn History>, queue: Arc<dyn TaskQueue>) -> Self {
+        Self { history, queue, workflows: HashMap::new(), activities: HashMap::new(), observer: None }
+    }
+
+    pub fn register_workflow<W: workflow::Definition>(&mut self) {
+        self.workflows.insert(
+            W::TYPE.to_string(),
+            Arc::new(|info, events| workflow::cold_replay::<W>(info, events)),
+        );
+    }
+
+    pub fn register_activity<A: activity::Definition>(&mut self) {
+        self.activities.insert(
+            A::TYPE.to_string(),
+            Arc::new(|ctx, bytes| {
+                Box::pin(async move {
+                    let input: A::Input = serde_json::from_slice(&bytes)
+                        .map_err(|e| activity::Error::fatal(format!("activity input deserialize: {e}")))?;
+                    let out = A::run(ctx, input).await?;
+                    serde_json::to_vec(&out)
+                        .map_err(|e| activity::Error::fatal(format!("activity output serialize: {e}")))
+                })
+            }),
+        );
+    }
+
+    pub fn on_run_completed<F: Fn(RunCompleted) + Send + Sync + 'static>(&mut self, f: F) {
+        self.observer = Some(Arc::new(f));
+    }
+}
+
+/// Durable handle to a started run (spec §7.1).
+pub struct Handle {
+    run_id: String,
+    workflow_id: String,
+    history: Arc<dyn History>,
+}
+
+impl Handle {
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    /// Await durable completion, deserializing the workflow output (spec §9).
+    pub async fn result<T: DeserializeOwned>(&self) -> anyhow::Result<T> {
+        loop {
+            match self.history.find_execution(&self.workflow_id).await? {
+                Some((_, ExecStatus::Completed, Some(bytes))) => {
+                    return Ok(serde_json::from_slice(&bytes)?);
+                }
+                Some((_, ExecStatus::Completed, None)) => anyhow::bail!("completed without result"),
+                Some((_, ExecStatus::Failed, _)) => anyhow::bail!("workflow failed"),
+                Some((_, ExecStatus::Running, _)) => tokio::time::sleep(Duration::from_millis(5)).await,
+                None => anyhow::bail!("no execution for workflow id {}", self.workflow_id),
+            }
+        }
+    }
+}
+
+impl Engine {
+    /// Start a workflow, deduping by `opts.id` (spec §7.1).
+    pub async fn start_workflow<W: workflow::Definition>(
+        &self,
+        input: W::Input,
+        opts: StartOptions,
+    ) -> anyhow::Result<Handle> {
+        let input_bytes = serde_json::to_vec(&input)?;
+        let candidate = uuid::Uuid::new_v4().to_string();
+        let (_outcome, run_id) = self
+            .history
+            .create_execution(&candidate, &opts.id, W::TYPE, &input_bytes)
+            .await?;
+        Ok(Handle { run_id, workflow_id: opts.id, history: self.history.clone() })
+    }
+}
+
+use std::collections::HashSet;
+
+impl Engine {
+    /// Process one runnable workflow: cold-replay, persist newly-emitted commands,
+    /// update status, fire the observer on terminal (spec §5.1). Returns false if
+    /// nothing was runnable.
+    pub async fn process_one_runnable(&self) -> anyhow::Result<bool> {
+        let Some(run_id) = self.queue.next_runnable().await? else {
+            return Ok(false);
+        };
+        let meta = self
+            .history
+            .load_run(&run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("runnable run {run_id} has no execution row"))?;
+
+        let stored = self.history.read_history(&run_id).await?;
+        let events: Vec<workflow::Event> = stored.into_iter().map(|s| s.event).collect();
+        let recorded: HashSet<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                workflow::Event::ActivityScheduled { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .collect();
+
+        let info = workflow::Info {
+            execution: workflow::Execution {
+                workflow_id: meta.workflow_id.clone(),
+                run_id: run_id.clone(),
+            },
+            parent: None,
+            workflow_type: meta.workflow_type.clone(),
+        };
+        let replay = self
+            .workflows
+            .get(&meta.workflow_type)
+            .ok_or_else(|| anyhow::anyhow!("unregistered workflow {}", meta.workflow_type))?
+            .clone();
+
+        let outcome = replay(info, &events)
+            .map_err(|e| anyhow::anyhow!("nondeterminism in {}: {e}", meta.workflow_type))?;
+
+        // Persist only commands not already recorded in history.
+        let mut new_events = Vec::new();
+        let mut new_tasks = Vec::new();
+        for cmd in &outcome.commands {
+            let workflow::Command::ScheduleActivity { seq, activity_type, input, retry } = cmd;
+            if recorded.contains(seq) {
+                continue;
+            }
+            new_events.push(workflow::Event::ActivityScheduled {
+                seq: *seq,
+                activity_type: activity_type.clone(),
+                input: input.clone(),
+                retry: retry.clone(),
+            });
+            new_tasks.push(NewActivityTask {
+                seq: *seq as i64,
+                activity_type: activity_type.clone(),
+                input: input.clone(),
+                next_run_at: 0,
+            });
+        }
+
+        let (status, result) = match &outcome.completion {
+            Some(Ok(bytes)) => (ExecStatus::Completed, Some(bytes.clone())),
+            Some(Err(err)) => (ExecStatus::Failed, Some(serde_json::to_vec(err)?)),
+            None => (ExecStatus::Running, None),
+        };
+
+        let commit = TurnCommit { events: new_events, new_tasks, status, result: result.clone() };
+        self.history.commit_turn(&run_id, &commit).await?;
+
+        if status != ExecStatus::Running {
+            if let Some(obs) = &self.observer {
+                obs(RunCompleted {
+                    run_id: run_id.clone(),
+                    workflow_id: meta.workflow_id,
+                    status,
+                    result,
+                });
+            }
+        }
+        Ok(true)
+    }
+}
+
+impl Engine {
+    /// Lease one due activity task, run it, and record the outcome — completing on
+    /// success/terminal failure, rescheduling with backoff otherwise (spec §5.2, §8).
+    /// Returns false if nothing was due.
+    pub async fn process_one_activity(&self) -> anyhow::Result<bool> {
+        let Some(lease) = self.queue.lease_activity().await? else {
+            return Ok(false);
+        };
+
+        let runner = match self.activities.get(&lease.activity_type) {
+            Some(r) => r.clone(),
+            None => {
+                self.queue
+                    .complete_activity(
+                        &lease,
+                        workflow::CommandResult::ActivityFailed(activity::Error::fatal(format!(
+                            "unregistered activity {}",
+                            lease.activity_type
+                        ))),
+                    )
+                    .await?;
+                return Ok(true);
+            }
+        };
+
+        let ctx = activity::Context::new(activity::Info {
+            execution: activity::Execution {
+                workflow_id: lease.workflow_id.clone(),
+                run_id: lease.run_id.clone(),
+            },
+            activity_id: lease.seq.to_string(),
+            activity_type: lease.activity_type.clone(),
+            attempt: lease.attempt,
+        });
+
+        match runner(ctx, lease.input.clone()).await {
+            Ok(output) => {
+                self.queue
+                    .complete_activity(&lease, workflow::CommandResult::ActivityCompleted(output))
+                    .await?;
+            }
+            Err(e) => {
+                let exhausted = e.non_retryable || lease.attempt >= lease.retry.max_attempts;
+                if exhausted {
+                    self.queue
+                        .complete_activity(&lease, workflow::CommandResult::ActivityFailed(e))
+                        .await?;
+                } else {
+                    let delay = lease.retry.backoff_ms(lease.attempt + 1) as i64;
+                    self.queue.reschedule_activity(&lease, now_ms() + delay).await?;
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+impl Engine {
+    /// Spawn the driver and activity-worker loops as background tokio tasks and
+    /// return a shared handle. Use the `process_one_*` methods directly in tests
+    /// for deterministic stepping.
+    pub fn start(self) -> Arc<Engine> {
+        let engine = Arc::new(self);
+
+        let driver = engine.clone();
+        tokio::spawn(async move {
+            loop {
+                match driver.process_one_runnable().await {
+                    Ok(true) => {}
+                    Ok(false) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Err(err) => {
+                        eprintln!("driver error: {err:#}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        });
+
+        let worker = engine.clone();
+        tokio::spawn(async move {
+            loop {
+                match worker.process_one_activity().await {
+                    Ok(true) => {}
+                    Ok(false) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Err(err) => {
+                        eprintln!("worker error: {err:#}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        });
+
+        engine
+    }
+}
