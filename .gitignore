@@ -1,0 +1,5 @@
+# Rust build artifacts
+/target
+
+# Stray single-file rustc output (default binary name)
+/rust_out
