@@ -13,3 +13,6 @@ pub use command::Command;
 
 mod event;
 pub use event::Event;
+
+mod result;
+pub use result::CommandResult;
