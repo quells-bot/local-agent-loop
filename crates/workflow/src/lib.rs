@@ -10,3 +10,6 @@ pub use retry::RetryPolicy;
 
 mod command;
 pub use command::Command;
+
+mod event;
+pub use event::Event;
