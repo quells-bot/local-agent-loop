@@ -15,6 +15,10 @@ impl ExecStatus {
             ExecStatus::Failed => "failed",
         }
     }
+    // Inherent Option-returning `from_str` is the intended API across the
+    // engine/persist crates (`from_str(&status).unwrap_or(..)`); a Result-based
+    // `FromStr` impl would be the wrong shape here.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "running" => Some(ExecStatus::Running),
