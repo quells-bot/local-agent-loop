@@ -28,3 +28,6 @@ pub use future::ActivityFuture;
 
 mod def;
 pub use def::Definition;
+
+mod state;
+pub use state::WorkflowState;
