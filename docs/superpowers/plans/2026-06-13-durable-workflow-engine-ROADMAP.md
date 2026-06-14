@@ -119,7 +119,8 @@ pub struct RetryPolicy { pub max_attempts: u32, pub initial_ms: u64, pub multipl
 
 pub enum Command {                      // emitted by futures, drained by driver
     ScheduleActivity { seq: u64, activity_type: String, input: Vec<u8>, retry: RetryPolicy },
-    // Pass 2 adds StartTimer; Pass 4 adds StartChild; Pass 3 adds nothing (signals are inbound)
+    StartTimer { seq: u64, duration_ms: u64 },   // 2a (done)
+    // Pass 4 adds StartChild; Pass 3 adds nothing (signals are inbound)
 }                                       // derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize
 
 pub enum Event {                        // history record, applied into ctx + persisted
@@ -127,7 +128,9 @@ pub enum Event {                        // history record, applied into ctx + pe
     ActivityScheduled { seq: u64, activity_type: String, input: Vec<u8>, retry: RetryPolicy },
     ActivityCompleted { seq: u64, output: Vec<u8> },
     ActivityFailed    { seq: u64, error: activity::Error },
-    // Pass 2: TimerFired; Pass 3: SignalReceived; Pass 4: ChildCompleted;
+    TimerStarted      { seq: u64, duration_ms: u64 },   // 2a (done)
+    TimerFired        { seq: u64 },                      // 2a (done)
+    // Pass 3: SignalReceived; Pass 4: ChildCompleted;
     // reserved: WorkflowCancelRequested
 }                                       // derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize
                                         // method: kind(&self) -> &'static str
@@ -156,7 +159,9 @@ pub struct Context { /* Rc<ContextInner>; minimal in 1a, replay state added in 1
 ```rust
 pub struct StoredEvent { pub event_id: i64, pub event: workflow::Event }
 pub struct TurnCommit { pub events: Vec<Event>, pub new_tasks: Vec<NewActivityTask>,
+                        pub new_timers: Vec<NewTimer>,    // 2a (done)
                         pub status: ExecStatus, pub result: Option<Vec<u8>> }
+pub struct NewTimer { pub seq: i64, pub fire_at: i64 }    // 2a (done)
 
 #[async_trait] pub trait History {
     async fn create_execution(&self, candidate_run_id: &str, workflow_id: &str,
@@ -172,6 +177,7 @@ pub struct TurnCommit { pub events: Vec<Event>, pub new_tasks: Vec<NewActivityTa
     async fn lease_activity(&self) -> Result<Option<ActivityLease>>;
     async fn complete_activity(&self, lease: &ActivityLease, result: CommandResult) -> Result<()>;
     async fn reschedule_activity(&self, lease: &ActivityLease, next_run_at: i64) -> Result<()>;
+    async fn fire_due_timer(&self) -> Result<bool>;   // 2a (done)
 }
 pub enum SignalError { WorkflowNotFound, NotRunning }   // Pass 3
 ```
@@ -190,7 +196,7 @@ chunk **1c**.)
 | 1b | Replay core (pure) | §3, §4, §12 | `archive/2026-06-13-pass-1b-replay-core.md` | done |
 | 1c | Backend traits + SQLite persist | §5, §11, §15 | `archive/2026-06-13-pass-1c-persist-and-traits.md` | done |
 | 1d | Driver + workers + start + observer | §5, §6.1(start), §7, §8 | `archive/2026-06-13-pass-1d-driver-and-workers.md` | done |
-| 2a | Timers (`sleep`/`timer` + service) | §4, §5.3 | `2026-06-14-pass-2a-timers.md` | authored |
+| 2a | Timers (`sleep`/`timer` + service) | §4, §5.3 | `2026-06-14-pass-2a-timers.md` | done |
 | 2b | Combinators + spawn scheduler | §4.2, §4.4 | `2026-06-14-pass-2b-combinators-and-spawn.md` | authored |
 | 2c | Robustness hardening (lease-expiry + dead-letter) | §5.1, §5.2, §14 | `2026-06-14-pass-2c-hardening.md` | authored |
 | 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | _(JIT)_ | not yet authored |
