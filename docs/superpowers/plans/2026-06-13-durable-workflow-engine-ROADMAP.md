@@ -143,6 +143,10 @@ pub struct Error { pub message: String }      // workflow failure
 
 pub struct Context { /* Rc<ContextInner>; minimal in 1a, replay state added in 1b */ }
 //   info() -> &Info  (1a);  activity::<A>(input) -> ActivityFuture, now(), random() (1b)
+//   timer/sleep(dur) -> TimerFuture (2a);  spawn(fut) -> SpawnHandle<T> (2b, workflow.Go analog)
+
+pub struct SpawnHandle<T> { /* Rc<RefCell<Option<T>>>; resolves to T when the branch completes */ }  // 2b
+// WorkflowState drives main + spawned branches to quiescence per turn (ordered scheduler, §4.4).  // 2b
 
 // `?Send`: workflow futures hold Rc/RefCell (single-threaded loop), so they are
 // NOT Send. Associated types are `'static` (not Send — values never cross threads).
@@ -197,7 +201,7 @@ chunk **1c**.)
 | 1c | Backend traits + SQLite persist | §5, §11, §15 | `archive/2026-06-13-pass-1c-persist-and-traits.md` | done |
 | 1d | Driver + workers + start + observer | §5, §6.1(start), §7, §8 | `archive/2026-06-13-pass-1d-driver-and-workers.md` | done |
 | 2a | Timers (`sleep`/`timer` + service) | §4, §5.3 | `2026-06-14-pass-2a-timers.md` | done |
-| 2b | Combinators + spawn scheduler | §4.2, §4.4 | `2026-06-14-pass-2b-combinators-and-spawn.md` | authored |
+| 2b | Combinators + spawn scheduler | §4.2, §4.4 | `2026-06-14-pass-2b-combinators-and-spawn.md` | done |
 | 2c | Robustness hardening (lease-expiry + dead-letter) | §5.1, §5.2, §14 | `2026-06-14-pass-2c-hardening.md` | authored |
 | 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | _(JIT)_ | not yet authored |
 | 3b | `signal_workflow` + signal-or-timeout e2e | §6.1, §7.2 | _(JIT)_ | not yet authored |
