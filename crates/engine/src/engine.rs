@@ -82,3 +82,48 @@ impl Engine {
         self.observer = Some(Arc::new(f));
     }
 }
+
+/// Durable handle to a started run (spec §7.1).
+pub struct Handle {
+    run_id: String,
+    workflow_id: String,
+    history: Arc<dyn History>,
+}
+
+impl Handle {
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    /// Await durable completion, deserializing the workflow output (spec §9).
+    pub async fn result<T: DeserializeOwned>(&self) -> anyhow::Result<T> {
+        loop {
+            match self.history.find_execution(&self.workflow_id).await? {
+                Some((_, ExecStatus::Completed, Some(bytes))) => {
+                    return Ok(serde_json::from_slice(&bytes)?);
+                }
+                Some((_, ExecStatus::Completed, None)) => anyhow::bail!("completed without result"),
+                Some((_, ExecStatus::Failed, _)) => anyhow::bail!("workflow failed"),
+                Some((_, ExecStatus::Running, _)) => tokio::time::sleep(Duration::from_millis(5)).await,
+                None => anyhow::bail!("no execution for workflow id {}", self.workflow_id),
+            }
+        }
+    }
+}
+
+impl Engine {
+    /// Start a workflow, deduping by `opts.id` (spec §7.1).
+    pub async fn start_workflow<W: workflow::Definition>(
+        &self,
+        input: W::Input,
+        opts: StartOptions,
+    ) -> anyhow::Result<Handle> {
+        let input_bytes = serde_json::to_vec(&input)?;
+        let candidate = uuid::Uuid::new_v4().to_string();
+        let (_outcome, run_id) = self
+            .history
+            .create_execution(&candidate, &opts.id, W::TYPE, &input_bytes)
+            .await?;
+        Ok(Handle { run_id, workflow_id: opts.id, history: self.history.clone() })
+    }
+}
