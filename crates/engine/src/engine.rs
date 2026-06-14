@@ -215,3 +215,60 @@ impl Engine {
         Ok(true)
     }
 }
+
+impl Engine {
+    /// Lease one due activity task, run it, and record the outcome — completing on
+    /// success/terminal failure, rescheduling with backoff otherwise (spec §5.2, §8).
+    /// Returns false if nothing was due.
+    pub async fn process_one_activity(&self) -> anyhow::Result<bool> {
+        let Some(lease) = self.queue.lease_activity().await? else {
+            return Ok(false);
+        };
+
+        let runner = match self.activities.get(&lease.activity_type) {
+            Some(r) => r.clone(),
+            None => {
+                self.queue
+                    .complete_activity(
+                        &lease,
+                        workflow::CommandResult::ActivityFailed(activity::Error::fatal(format!(
+                            "unregistered activity {}",
+                            lease.activity_type
+                        ))),
+                    )
+                    .await?;
+                return Ok(true);
+            }
+        };
+
+        let ctx = activity::Context::new(activity::Info {
+            execution: activity::Execution {
+                workflow_id: lease.workflow_id.clone(),
+                run_id: lease.run_id.clone(),
+            },
+            activity_id: lease.seq.to_string(),
+            activity_type: lease.activity_type.clone(),
+            attempt: lease.attempt,
+        });
+
+        match runner(ctx, lease.input.clone()).await {
+            Ok(output) => {
+                self.queue
+                    .complete_activity(&lease, workflow::CommandResult::ActivityCompleted(output))
+                    .await?;
+            }
+            Err(e) => {
+                let exhausted = e.non_retryable || lease.attempt >= lease.retry.max_attempts;
+                if exhausted {
+                    self.queue
+                        .complete_activity(&lease, workflow::CommandResult::ActivityFailed(e))
+                        .await?;
+                } else {
+                    let delay = lease.retry.backoff_ms(lease.attempt + 1) as i64;
+                    self.queue.reschedule_activity(&lease, now_ms() + delay).await?;
+                }
+            }
+        }
+        Ok(true)
+    }
+}
