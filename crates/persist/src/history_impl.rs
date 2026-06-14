@@ -10,7 +10,9 @@ fn encode(event: &Event) -> (Option<i64>, &'static str, Vec<u8>) {
     let seq = match event {
         Event::ActivityScheduled { seq, .. }
         | Event::ActivityCompleted { seq, .. }
-        | Event::ActivityFailed { seq, .. } => Some(*seq as i64),
+        | Event::ActivityFailed { seq, .. }
+        | Event::TimerStarted { seq, .. }
+        | Event::TimerFired { seq } => Some(*seq as i64),
         Event::WorkflowStarted { .. } => None,
     };
     let payload = serde_json::to_vec(event).expect("event serializes");
@@ -134,6 +136,13 @@ impl History for Sqlite {
             )?;
         }
 
+        for timer in &commit.new_timers {
+            tx.execute(
+                "INSERT OR REPLACE INTO timers (run_id, seq, fire_at) VALUES (?1, ?2, ?3)",
+                params![run_id, timer.seq, timer.fire_at],
+            )?;
+        }
+
         tx.execute(
             "UPDATE executions SET status = ?2, result = ?3 WHERE run_id = ?1",
             params![run_id, commit.status.as_str(), commit.result],
@@ -212,6 +221,7 @@ mod tests {
                 input: b"[1,2]".to_vec(),
                 next_run_at: 0,
             }],
+            new_timers: vec![],
             status: ExecStatus::Running,
             result: None,
         };
