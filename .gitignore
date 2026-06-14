@@ -1,5 +1,22 @@
 # Rust build artifacts
 /target
 
-# Stray single-file rustc output (default binary name)
-/rust_out
+# OS-generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
