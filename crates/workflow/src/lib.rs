@@ -7,3 +7,6 @@ pub use info::Info;
 
 mod retry;
 pub use retry::RetryPolicy;
+
+mod command;
+pub use command::Command;
