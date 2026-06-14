@@ -142,9 +142,14 @@ impl Engine {
 
         if meta.status != ExecStatus::Running {
             // Already terminal: a late completion re-marked it runnable. Preserve the
-            // stored result and only clear the stale runnable flag (Inv 5).
-            let existing = self.history.find_execution(&meta.workflow_id).await?;
-            let result = existing.and_then(|(_, _, r)| r);
+            // stored result and only clear the stale runnable flag — prevents the
+            // observer double-firing (spec §7.3); the Inv 5 commit boundary still holds.
+            let existing = self
+                .history
+                .find_execution(&meta.workflow_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("terminal run {run_id} has no execution row"))?;
+            let result = existing.2;
             let commit = TurnCommit {
                 events: Vec::new(),
                 new_tasks: Vec::new(),
