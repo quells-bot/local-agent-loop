@@ -20,9 +20,11 @@ independently-testable chunks.
 
 The spec is long. A single monolithic plan would be hard to keep correct. Instead
 the work follows the spec's five **passes**, and each pass subdivides into
-**chunks** that each produce working, tested software. Roughly 11 chunks total,
+**chunks** that each produce working, tested software. Roughly 12 chunks total,
 each small-to-medium. Signals land in Pass 3 (the earliest non-artificial slot,
-spec §13).
+spec §13). Chunk **2c** is robustness hardening folded out of the Pass 1 review
+(lease-expiry, dead-lettering) — the concurrency/timer machinery from 2a/2b turns
+those latent gaps into real bugs, so they are fixed before Pass 3 builds on top.
 
 ---
 
@@ -188,8 +190,9 @@ chunk **1c**.)
 | 1b | Replay core (pure) | §3, §4, §12 | `archive/2026-06-13-pass-1b-replay-core.md` | done |
 | 1c | Backend traits + SQLite persist | §5, §11, §15 | `archive/2026-06-13-pass-1c-persist-and-traits.md` | done |
 | 1d | Driver + workers + start + observer | §5, §6.1(start), §7, §8 | `archive/2026-06-13-pass-1d-driver-and-workers.md` | done |
-| 2a | Timers (`sleep`/`timer` + service) | §4, §5.3 | _(JIT)_ | not yet authored |
-| 2b | Combinators + spawn scheduler | §4.2, §4.4 | _(JIT)_ | not yet authored |
+| 2a | Timers (`sleep`/`timer` + service) | §4, §5.3 | `2026-06-14-pass-2a-timers.md` | authored |
+| 2b | Combinators + spawn scheduler | §4.2, §4.4 | `2026-06-14-pass-2b-combinators-and-spawn.md` | authored |
+| 2c | Robustness hardening (lease-expiry + dead-letter) | §5.1, §5.2, §14 | `2026-06-14-pass-2c-hardening.md` | authored |
 | 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | _(JIT)_ | not yet authored |
 | 3b | `signal_workflow` + signal-or-timeout e2e | §6.1, §7.2 | _(JIT)_ | not yet authored |
 | 4a | Child workflows | §5.4, §9(info.parent) | _(JIT)_ | not yet authored |
