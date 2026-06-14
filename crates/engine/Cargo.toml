@@ -9,3 +9,10 @@ workflow    = { path = "../workflow" }
 activity    = { path = "../activity" }
 async-trait = { workspace = true }
 anyhow      = "1"
+tokio       = { workspace = true }
+uuid        = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+
+[dev-dependencies]
+persist = { path = "../persist" }

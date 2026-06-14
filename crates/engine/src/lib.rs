@@ -4,3 +4,6 @@ pub use types::*;
 
 mod traits;
 pub use traits::{History, TaskQueue};
+
+mod engine;
+pub use engine::{Engine, RunCompleted, StartOptions};
