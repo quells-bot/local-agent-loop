@@ -1,0 +1,76 @@
+use workflow::{Event, RetryPolicy};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl ExecStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExecStatus::Running => "running",
+            ExecStatus::Completed => "completed",
+            ExecStatus::Failed => "failed",
+        }
+    }
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "running" => Some(ExecStatus::Running),
+            "completed" => Some(ExecStatus::Completed),
+            "failed" => Some(ExecStatus::Failed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredEvent {
+    pub event_id: i64,
+    pub event: Event,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewActivityTask {
+    pub seq: i64,
+    pub activity_type: String,
+    pub input: Vec<u8>,
+    pub next_run_at: i64, // epoch ms; <= now means runnable immediately
+}
+
+/// Everything a single decision turn commits atomically (spec §5.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnCommit {
+    pub events: Vec<Event>,            // new history events emitted this turn
+    pub new_tasks: Vec<NewActivityTask>,
+    pub status: ExecStatus,
+    pub result: Option<Vec<u8>>,       // Some iff status != Running
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityLease {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub seq: i64,
+    pub activity_type: String,
+    pub input: Vec<u8>,
+    pub attempt: u32, // 1-based; this is the current attempt number
+    pub retry: RetryPolicy, // read from the ActivityScheduled event by the queue
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateOutcome {
+    Created,
+    AlreadyExists,
+}
+
+/// Metadata for one run, resolved by `run_id` (driver needs this to build
+/// `workflow::Info` and pick the replay closure).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunMeta {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_type: String,
+    pub status: ExecStatus,
+}
