@@ -9,13 +9,9 @@ use serde::de::DeserializeOwned;
 use crate::{ExecStatus, History, NewActivityTask, TaskQueue, TurnCommit};
 
 /// Options for starting a workflow (spec §7.1). `id` is the dedup key.
+#[derive(Default)]
 pub struct StartOptions {
     pub id: String,
-}
-impl Default for StartOptions {
-    fn default() -> Self {
-        Self { id: String::new() }
-    }
 }
 
 /// Emitted to the completion observer after a turn drives a run terminal (spec §7.3).
