@@ -16,3 +16,6 @@ pub use event::Event;
 
 mod result;
 pub use result::CommandResult;
+
+mod error;
+pub use error::Error;
