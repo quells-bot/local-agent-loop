@@ -19,3 +19,9 @@ pub use result::CommandResult;
 
 mod error;
 pub use error::Error;
+
+mod context;
+pub use context::Context;
+
+mod def;
+pub use def::Definition;
