@@ -4,3 +4,6 @@ pub use activity::Execution; // re-export so workflow::Execution exists (spec §
 
 mod info;
 pub use info::Info;
+
+mod retry;
+pub use retry::RetryPolicy;
