@@ -91,7 +91,7 @@ impl Context {
         F: Future<Output = T> + 'static,
         T: 'static,
     {
-        let slot = std::rc::Rc::new(RefCell::new(None));
+        let slot = Rc::new(RefCell::new(None));
         let writer = slot.clone();
         let wrapped: Pin<Box<dyn Future<Output = ()>>> = Box::pin(async move {
             let v = fut.await;

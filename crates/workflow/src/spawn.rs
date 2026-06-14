@@ -11,6 +11,8 @@ pub struct SpawnHandle<T> {
     pub(crate) slot: Rc<RefCell<Option<T>>>,
 }
 
+// SpawnHandle is automatically Unpin: Rc<RefCell<_>> holds no self-referential data,
+// so the Pin<&mut Self> in poll needs no structural pinning.
 impl<T> Future for SpawnHandle<T> {
     type Output = T;
 

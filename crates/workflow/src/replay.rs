@@ -355,4 +355,84 @@ mod tests {
         assert_eq!(outcome.commands.len(), 1);
         assert!(matches!(&outcome.commands[0], Command::ScheduleActivity { seq: 0, .. }));
     }
+
+    // Fire-and-forget: a spawned branch is never awaited; `main` does its own
+    // activity and returns. main completes without waiting on the branch.
+    // Seq order: main is polled first and reaches its OWN activity (seq 0) before
+    // the spawned branch is absorbed and polled (its activity is seq 1).
+    struct FireAndForget;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for FireAndForget {
+        type Input = ();
+        type Output = i64;
+        const TYPE: &'static str = "FireAndForget";
+        async fn run(ctx: Context, _i: ()) -> Result<i64, Error> {
+            let ctx2 = ctx.clone();
+            let _detached = ctx.spawn(async move { ctx2.activity::<Add>((1, 1)).await.unwrap() });
+            let v = ctx.activity::<Add>((10, 20)).await?;
+            Ok(v)
+        }
+    }
+
+    #[test]
+    fn fire_and_forget_spawn_does_not_block_completion() {
+        let info = Info {
+            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            parent: None,
+            workflow_type: "FireAndForget".into(),
+        };
+        let h = vec![
+            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
+            Event::ActivityScheduled { seq: 0, activity_type: "Add".into(), input: add_input(10, 20), retry: RetryPolicy::none() },
+            Event::ActivityScheduled { seq: 1, activity_type: "Add".into(), input: add_input(1, 1), retry: RetryPolicy::none() },
+            Event::ActivityCompleted { seq: 0, output: serde_json::to_vec(&30i64).unwrap() },
+            Event::ActivityCompleted { seq: 1, output: serde_json::to_vec(&2i64).unwrap() },
+        ];
+        let outcome = cold_replay::<FireAndForget>(info, &h).unwrap();
+        let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(out, 30, "main returns its own activity result regardless of the detached branch");
+        assert_eq!(outcome.commands.len(), 2, "both the main and the detached activity are scheduled");
+    }
+
+    // Two concurrent spawns whose activities complete OUT OF ORDER (branch B's
+    // result is recorded before branch A's). The slot mechanism must still deliver
+    // each branch its own result. Seq order: main spawns A then B, awaits A; both
+    // branches are absorbed in creation order, so A's activity is seq 0, B's seq 1.
+    struct TwoSpawns;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for TwoSpawns {
+        type Input = ();
+        type Output = i64;
+        const TYPE: &'static str = "TwoSpawns";
+        async fn run(ctx: Context, _i: ()) -> Result<i64, Error> {
+            let c1 = ctx.clone();
+            let c2 = ctx.clone();
+            let a = ctx.spawn(async move { c1.activity::<Add>((1, 1)).await.unwrap() });
+            let b = ctx.spawn(async move { c2.activity::<Add>((2, 2)).await.unwrap() });
+            let va = a.await;
+            let vb = b.await;
+            Ok(va * 10 + vb)
+        }
+    }
+
+    #[test]
+    fn two_spawns_resolve_out_of_order() {
+        let info = Info {
+            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            parent: None,
+            workflow_type: "TwoSpawns".into(),
+        };
+        let h = vec![
+            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
+            Event::ActivityScheduled { seq: 0, activity_type: "Add".into(), input: add_input(1, 1), retry: RetryPolicy::none() },
+            Event::ActivityScheduled { seq: 1, activity_type: "Add".into(), input: add_input(2, 2), retry: RetryPolicy::none() },
+            // Branch B (seq 1) completes BEFORE branch A (seq 0).
+            Event::ActivityCompleted { seq: 1, output: serde_json::to_vec(&4i64).unwrap() },
+            Event::ActivityCompleted { seq: 0, output: serde_json::to_vec(&2i64).unwrap() },
+        ];
+        let outcome = cold_replay::<TwoSpawns>(info, &h).unwrap();
+        let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(out, 24, "va=2 (A=1+1), vb=4 (B=2+2) -> 2*10+4 even though B resolved first");
+        assert_eq!(outcome.commands.len(), 2);
+    }
 }

@@ -63,7 +63,8 @@ impl WorkflowState {
                 }
             }
 
-            // Absorb spawns created by spawned branches this iteration.
+            // Absorb futures spawned by branches during this sweep — they are polled
+            // on the next quiescence iteration (pushing one sets `progressed`).
             for fut in self.ctx.drain_new_spawns() {
                 self.spawned.push(Some(fut));
                 progressed = true;
