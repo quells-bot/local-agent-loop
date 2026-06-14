@@ -42,6 +42,10 @@ impl WorkflowState {
     pub fn apply_result(&self, seq: u64, result: CommandResult) {
         self.ctx.apply_result(seq, result);
     }
+
+    pub fn apply_timer_fired(&self, seq: u64) {
+        self.ctx.apply_timer_fired(seq);
+    }
 }
 
 #[cfg(test)]

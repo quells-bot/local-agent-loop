@@ -61,6 +61,43 @@ impl<A: activity::Definition> Future for ActivityFuture<A> {
     }
 }
 
+/// Awaitable handle for one timer. Resolves to `()` once its TimerFired event has
+/// been applied. `seq` identifies it in history; the shared `scheduled` set means
+/// it emits `StartTimer` exactly once across re-polls (spec §3, §5.3).
+pub struct TimerFuture {
+    inner: Rc<ContextInner>,
+    seq: u64,
+    duration_ms: u64,
+}
+
+impl TimerFuture {
+    pub(crate) fn new(inner: Rc<ContextInner>, seq: u64, duration_ms: u64) -> Self {
+        Self { inner, seq, duration_ms }
+    }
+}
+
+impl Future for TimerFuture {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<()> {
+        let me = self.get_mut();
+
+        // 1. Replay path: this timer's TimerFired has been applied -> resolve.
+        if me.inner.fired.borrow().contains(&me.seq) {
+            return Poll::Ready(());
+        }
+
+        // 2. First arrival: emit StartTimer exactly once, then park (Invariant 4).
+        if me.inner.scheduled.borrow_mut().insert(me.seq) {
+            me.inner.commands.borrow_mut().push(Command::StartTimer {
+                seq: me.seq,
+                duration_ms: me.duration_ms,
+            });
+        }
+        Poll::Pending
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

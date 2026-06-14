@@ -9,6 +9,8 @@ pub enum Event {
     ActivityScheduled { seq: u64, activity_type: String, input: Vec<u8>, retry: RetryPolicy },
     ActivityCompleted { seq: u64, output: Vec<u8> },
     ActivityFailed { seq: u64, error: activity::Error },
+    TimerStarted { seq: u64, duration_ms: u64 },
+    TimerFired { seq: u64 },
 }
 
 impl Event {
@@ -19,6 +21,8 @@ impl Event {
             Event::ActivityScheduled { .. } => "ActivityScheduled",
             Event::ActivityCompleted { .. } => "ActivityCompleted",
             Event::ActivityFailed { .. } => "ActivityFailed",
+            Event::TimerStarted { .. } => "TimerStarted",
+            Event::TimerFired { .. } => "TimerFired",
         }
     }
 }

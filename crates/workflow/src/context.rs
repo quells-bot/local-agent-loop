@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::future::ActivityFuture;
 use crate::{Command, CommandResult, Info, RetryPolicy};
@@ -12,6 +13,7 @@ pub(crate) struct ContextInner {
     pub(crate) results: RefCell<HashMap<u64, CommandResult>>, // seq -> recorded outcome
     pub(crate) scheduled: RefCell<HashSet<u64>>,              // seqs emitted this life
     pub(crate) commands: RefCell<Vec<Command>>,               // emitted this turn
+    pub(crate) fired: RefCell<HashSet<u64>>,                   // timer seqs fired (no payload)
 }
 
 #[derive(Clone)]
@@ -28,6 +30,7 @@ impl Context {
                 results: RefCell::new(HashMap::new()),
                 scheduled: RefCell::new(HashSet::new()),
                 commands: RefCell::new(Vec::new()),
+                fired: RefCell::new(HashSet::new()),
             }),
         }
     }
@@ -42,6 +45,25 @@ impl Context {
         self.inner.next_seq.set(seq + 1);
         let bytes = serde_json::to_vec(&input).expect("activity input serializes");
         ActivityFuture::new(self.inner.clone(), seq, bytes, RetryPolicy::none())
+    }
+
+    /// Start a timer. `seq` is allocated HERE (creation time, Invariant 2). The
+    /// duration is the deterministic, replay-checked datum; the engine converts it
+    /// to an absolute fire time when it commits the TimerStarted event (spec §5.3).
+    pub fn timer(&self, dur: Duration) -> crate::future::TimerFuture {
+        let seq = self.inner.next_seq.get();
+        self.inner.next_seq.set(seq + 1);
+        crate::future::TimerFuture::new(self.inner.clone(), seq, dur.as_millis() as u64)
+    }
+
+    /// `workflow.Sleep` analog — await a timer for `dur`.
+    pub fn sleep(&self, dur: Duration) -> crate::future::TimerFuture {
+        self.timer(dur)
+    }
+
+    /// Driver/replay applies a recorded TimerFired before a poll (one event/turn).
+    pub fn apply_timer_fired(&self, seq: u64) {
+        self.inner.fired.borrow_mut().insert(seq);
     }
 
     /// Driver applies exactly one recorded outcome before each poll (spec §4.1).

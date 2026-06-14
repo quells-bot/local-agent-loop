@@ -42,43 +42,69 @@ pub fn cold_replay<W: crate::Definition>(
     let input: W::Input = serde_json::from_slice(&input_bytes)
         .map_err(|e| Nondeterminism { seq: 0, detail: format!("input deserialize: {e}") })?;
 
-    // 2. Index recorded schedules (for the divergence check) and ordered results.
+    // 2. Index recorded schedules (for divergence checks) and the ordered stream of
+    //    things to apply one-per-turn (activity outcomes AND timer fires), in
+    //    event_id order. Timers resolve with no payload, so they get their own
+    //    apply variant rather than riding the CommandResult map.
+    enum Applied {
+        Result(u64, CommandResult),
+        Timer(u64),
+    }
     let mut recorded_sched: HashMap<u64, (String, Vec<u8>)> = HashMap::new();
-    let mut results: Vec<(u64, CommandResult)> = Vec::new();
+    let mut recorded_timer: HashMap<u64, u64> = HashMap::new(); // seq -> duration_ms
+    let mut applied: Vec<Applied> = Vec::new();
     for ev in history {
         match ev {
             Event::ActivityScheduled { seq, activity_type, input, .. } => {
                 recorded_sched.insert(*seq, (activity_type.clone(), input.clone()));
             }
             Event::ActivityCompleted { seq, output } => {
-                results.push((*seq, CommandResult::ActivityCompleted(output.clone())));
+                applied.push(Applied::Result(*seq, CommandResult::ActivityCompleted(output.clone())));
             }
             Event::ActivityFailed { seq, error } => {
-                results.push((*seq, CommandResult::ActivityFailed(error.clone())));
+                applied.push(Applied::Result(*seq, CommandResult::ActivityFailed(error.clone())));
+            }
+            Event::TimerStarted { seq, duration_ms } => {
+                recorded_timer.insert(*seq, *duration_ms);
+            }
+            Event::TimerFired { seq } => {
+                applied.push(Applied::Timer(*seq));
             }
             Event::WorkflowStarted { .. } => {}
         }
     }
 
-    // 3. Drive the workflow, applying one result per turn.
+    // 3. Drive the workflow, applying one item per turn.
     let mut state = WorkflowState::start::<W>(info, input);
     let mut commands = Vec::new();
     let mut cursor = 0usize;
     loop {
         let poll = state.poll_turn();
         for cmd in state.drain_commands() {
-            // Single-variant destructure; more Command variants arrive in later
-            // passes (StartTimer, StartChild), at which point this becomes a
-            // real match.
-            let Command::ScheduleActivity { seq, activity_type, input, .. } = &cmd;
-            if let Some((rty, rin)) = recorded_sched.get(seq) {
-                if rty != activity_type || rin != input {
-                    return Err(Nondeterminism {
-                        seq: *seq,
-                        detail: format!(
-                            "history recorded schedule of {rty}, workflow emitted {activity_type}"
-                        ),
-                    });
+            match &cmd {
+                Command::ScheduleActivity { seq, activity_type, input, .. } => {
+                    if let Some((rty, rin)) = recorded_sched.get(seq) {
+                        if rty != activity_type || rin != input {
+                            return Err(Nondeterminism {
+                                seq: *seq,
+                                detail: format!(
+                                    "history recorded schedule of {rty}, workflow emitted {activity_type}"
+                                ),
+                            });
+                        }
+                    }
+                }
+                Command::StartTimer { seq, duration_ms } => {
+                    if let Some(rdur) = recorded_timer.get(seq) {
+                        if rdur != duration_ms {
+                            return Err(Nondeterminism {
+                                seq: *seq,
+                                detail: format!(
+                                    "history recorded timer of {rdur}ms, workflow emitted {duration_ms}ms"
+                                ),
+                            });
+                        }
+                    }
                 }
             }
             commands.push(cmd);
@@ -88,9 +114,11 @@ pub fn cold_replay<W: crate::Definition>(
                 return Ok(ReplayOutcome { commands, completion: Some(result) });
             }
             Poll::Pending => {
-                if cursor < results.len() {
-                    let (seq, r) = results[cursor].clone();
-                    state.apply_result(seq, r);
+                if cursor < applied.len() {
+                    match &applied[cursor] {
+                        Applied::Result(seq, r) => state.apply_result(*seq, r.clone()),
+                        Applied::Timer(seq) => state.apply_timer_fired(*seq),
+                    }
                     cursor += 1;
                 } else {
                     return Ok(ReplayOutcome { commands, completion: None });
@@ -225,5 +253,64 @@ mod tests {
             Some(Err(e)) => assert_eq!(e.message, "boom"),
             other => panic!("expected Some(Err(boom)), got {other:?}"),
         }
+    }
+
+    // Workflow that sleeps, then runs one activity. Exercises a timer interleaved
+    // with an activity under the one-event-per-turn rule.
+    struct Nap;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for Nap {
+        type Input = ();
+        type Output = i64;
+        const TYPE: &'static str = "Nap";
+        async fn run(ctx: Context, _i: ()) -> Result<i64, Error> {
+            ctx.sleep(std::time::Duration::from_millis(500)).await;
+            let a = ctx.activity::<Add>((1, 2)).await?;
+            Ok(a)
+        }
+    }
+
+    fn nap_info() -> Info {
+        Info {
+            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            parent: None,
+            workflow_type: "Nap".into(),
+        }
+    }
+
+    #[test]
+    fn replays_timer_then_activity() {
+        let h = vec![
+            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
+            Event::TimerStarted { seq: 0, duration_ms: 500 },
+            Event::TimerFired { seq: 0 },
+            Event::ActivityScheduled {
+                seq: 1,
+                activity_type: "Add".into(),
+                input: add_input(1, 2),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityCompleted { seq: 1, output: serde_json::to_vec(&3i64).unwrap() },
+        ];
+        let outcome = cold_replay::<Nap>(nap_info(), &h).unwrap();
+        let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(out, 3);
+        // First command is the timer (seq 0), then the activity (seq 1).
+        assert!(matches!(&outcome.commands[0], Command::StartTimer { seq: 0, duration_ms: 500 }));
+        assert!(matches!(&outcome.commands[1], Command::ScheduleActivity { seq: 1, .. }));
+    }
+
+    #[test]
+    fn detects_divergent_timer_duration() {
+        // History recorded a 500ms timer at seq 0; Nap emits 500ms, so mutate the
+        // record to 999ms and expect a nondeterminism error at seq 0.
+        let h = vec![
+            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
+            Event::TimerStarted { seq: 0, duration_ms: 999 },
+            Event::TimerFired { seq: 0 },
+        ];
+        let err = cold_replay::<Nap>(nap_info(), &h).unwrap_err();
+        assert_eq!(err.seq, 0);
+        assert!(err.detail.contains("timer"));
     }
 }

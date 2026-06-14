@@ -11,6 +11,10 @@ pub enum Command {
         input: Vec<u8>,
         retry: RetryPolicy,
     },
+    StartTimer {
+        seq: u64,
+        duration_ms: u64,
+    },
 }
 
 #[cfg(test)]

@@ -24,7 +24,7 @@ mod context;
 pub use context::Context;
 
 mod future;
-pub use future::ActivityFuture;
+pub use future::{ActivityFuture, TimerFuture};
 
 mod def;
 pub use def::Definition;
