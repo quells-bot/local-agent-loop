@@ -49,6 +49,9 @@ impl TaskQueue for Sqlite {
             return Ok(None);
         };
 
+        // Assumes exactly one ActivityScheduled per (run_id, seq) — guaranteed by
+        // the driver's deterministic seq allocation. The matching history row is
+        // written in the same commit_turn that enqueued this task, so it exists.
         let retry_payload: Vec<u8> = tx.query_row(
             "SELECT payload FROM history WHERE run_id = ?1 AND seq = ?2 AND kind = 'ActivityScheduled'",
             params![run_id, seq],
@@ -178,5 +181,57 @@ mod tests {
         let lease = db.lease_activity().await.unwrap().unwrap();
         db.reschedule_activity(&lease, 0).await.unwrap();
         assert!(db.lease_activity().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn complete_with_failure_appends_activity_failed() {
+        let db = db_with_task().await;
+        let lease = db.lease_activity().await.unwrap().unwrap();
+        db.complete_activity(&lease, CommandResult::ActivityFailed(activity::Error::fatal("boom")))
+            .await
+            .unwrap();
+        let h = db.read_history("run-1").await.unwrap();
+        match &h.last().unwrap().event {
+            Event::ActivityFailed { seq: 0, error } => assert_eq!(error.message, "boom"),
+            other => panic!("expected ActivityFailed, got {other:?}"),
+        }
+        // a terminal completion still re-marks the run runnable (driver decides next)
+        assert_eq!(db.next_runnable().await.unwrap(), Some("run-1".into()));
+    }
+
+    #[tokio::test]
+    async fn lease_round_trips_the_scheduled_retry_policy() {
+        let db = Sqlite::open_in_memory().unwrap();
+        db.create_execution("run-1", "wf-A", "T", b"in").await.unwrap();
+        let policy = RetryPolicy::exponential(5);
+        let commit = TurnCommit {
+            events: vec![Event::ActivityScheduled {
+                seq: 0, activity_type: "Add".into(), input: b"[1,2]".to_vec(), retry: policy.clone(),
+            }],
+            new_tasks: vec![NewActivityTask { seq: 0, activity_type: "Add".into(), input: b"[1,2]".to_vec(), next_run_at: 0 }],
+            status: ExecStatus::Running,
+            result: None,
+        };
+        db.commit_turn("run-1", &commit).await.unwrap();
+
+        let lease = db.lease_activity().await.unwrap().unwrap();
+        assert_eq!(lease.retry, policy, "retry policy must round-trip from the ActivityScheduled payload");
+    }
+
+    #[tokio::test]
+    async fn task_not_due_yet_is_not_leasable() {
+        let db = Sqlite::open_in_memory().unwrap();
+        db.create_execution("run-1", "wf-A", "T", b"in").await.unwrap();
+        let future = now_ms() + 60_000; // due in a minute
+        let commit = TurnCommit {
+            events: vec![Event::ActivityScheduled {
+                seq: 0, activity_type: "Add".into(), input: b"[1,2]".to_vec(), retry: RetryPolicy::none(),
+            }],
+            new_tasks: vec![NewActivityTask { seq: 0, activity_type: "Add".into(), input: b"[1,2]".to_vec(), next_run_at: future }],
+            status: ExecStatus::Running,
+            result: None,
+        };
+        db.commit_turn("run-1", &commit).await.unwrap();
+        assert!(db.lease_activity().await.unwrap().is_none(), "task with future next_run_at must not lease");
     }
 }
