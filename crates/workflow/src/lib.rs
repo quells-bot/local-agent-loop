@@ -23,5 +23,8 @@ pub use error::Error;
 mod context;
 pub use context::Context;
 
+mod future;
+pub use future::ActivityFuture;
+
 mod def;
 pub use def::Definition;

@@ -7,9 +7,10 @@ publish = false
 [dependencies]
 activity    = { path = "../activity" }
 serde       = { workspace = true }
+serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 async-trait = { workspace = true }
+futures     = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
-tokio      = { workspace = true }
+tokio = { workspace = true }

@@ -12,6 +12,12 @@ impl Error {
     }
 }
 
+impl From<activity::Error> for Error {
+    fn from(e: activity::Error) -> Self {
+        Error { message: e.message }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
