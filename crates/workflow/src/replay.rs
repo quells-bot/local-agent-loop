@@ -69,8 +69,7 @@ pub fn cold_replay<W: crate::Definition>(
         for cmd in state.drain_commands() {
             // Single-variant destructure; more Command variants arrive in later
             // passes (StartTimer, StartChild), at which point this becomes a
-            // real match. The irrefutable-let lint is expected until then.
-            #[allow(irrefutable_let_patterns)]
+            // real match.
             let Command::ScheduleActivity { seq, activity_type, input, .. } = &cmd;
             if let Some((rty, rin)) = recorded_sched.get(seq) {
                 if rty != activity_type || rin != input {
@@ -186,5 +185,45 @@ mod tests {
         let err = cold_replay::<Sum>(info(), &h).unwrap_err();
         assert_eq!(err.seq, 0);
         assert!(err.detail.contains("Charge"));
+    }
+
+    #[test]
+    fn detects_divergent_activity_input() {
+        // History keeps activity_type "Add" for seq 0 but records a corrupted
+        // input; Sum emits add_input(1, 2). The type half matches, so this
+        // exercises the `rin != input` half of the divergence check. The detail
+        // reports the type ("Add" on both sides), so we assert only on .seq.
+        let mut h = full_history();
+        h[1] = Event::ActivityScheduled {
+            seq: 0,
+            activity_type: "Add".into(),
+            input: add_input(9, 9),
+            retry: RetryPolicy::none(),
+        };
+        let err = cold_replay::<Sum>(info(), &h).unwrap_err();
+        assert_eq!(err.seq, 0);
+    }
+
+    #[test]
+    fn failed_activity_surfaces_as_workflow_error() {
+        // seq 0 scheduled, then Failed. Sum's `?` converts the activity::Error
+        // into a workflow::Error and returns it: the workflow future resolves to
+        // Err. This is NOT nondeterminism — cold_replay returns Ok with a
+        // completion of Some(Err(_)).
+        let h = vec![
+            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
+            Event::ActivityScheduled {
+                seq: 0,
+                activity_type: "Add".into(),
+                input: add_input(1, 2),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityFailed { seq: 0, error: activity::Error::fatal("boom") },
+        ];
+        let outcome = cold_replay::<Sum>(info(), &h).unwrap();
+        match outcome.completion {
+            Some(Err(e)) => assert_eq!(e.message, "boom"),
+            other => panic!("expected Some(Err(boom)), got {other:?}"),
+        }
     }
 }
