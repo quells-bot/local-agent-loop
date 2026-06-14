@@ -2,9 +2,10 @@
 
 A single-node, embeddable workflow orchestration engine in Rust with a
 Temporal-like API (activities, workflows, child workflows, **signals**), backed
-by SQLite, running entirely in-process. Target host: a Tauri desktop app used to
-iterate on workflow/tool/skill shape before lifting the same workflow code to a
-cloud backend.
+by SQLite, running entirely in-process. It is the Rust backend of a **Tauri
+desktop app**, built first — before the app is scaffolded — to iterate on
+workflow/tool/skill shape before lifting the same workflow code to a cloud
+backend.
 
 This document is the implementation spec. Treat the **Invariants** section
 (§12) as load-bearing — most of the correctness of the engine reduces to those
@@ -13,9 +14,10 @@ pass is independently buildable and testable.
 
 **Guiding principle — Temporal Go SDK parity.** The workflow-facing API is
 shaped to mirror Temporal's Go SDK so that, once workflow logic is nailed down
-on desktop, translating it to the Go SDK is mechanical. Where a Rust idiom and a
-Go SDK idiom diverge, §11 records the intended mapping rather than forcing the
-surface to match exactly.
+on desktop, translating it to the Go SDK is mechanical. The crate split
+(§10) mirrors the SDK's `workflow.` / `activity.` packages, and §9.1 records the
+type-level mapping. Where a Rust idiom and a Go idiom diverge, the mapping table
+documents intent rather than forcing the surface to match exactly.
 
 ---
 
@@ -33,7 +35,7 @@ surface to match exactly.
 - **Signals**: externally-injected input (driven by Tauri IPC from the
   frontend) delivered durably to a running workflow and consumed through a
   Go-SDK-style signal channel.
-- A trait boundary clean enough that the workflow code written during desktop
+- A crate boundary clean enough that workflow code written during desktop
   iteration carries over unchanged to a cloud backend.
 
 **Non-goals (v1)**
@@ -73,21 +75,23 @@ Consequences:
 
 ## 3. The replay mechanism
 
-A workflow is `async fn(WfContext, Input) -> Output`. Every interaction with the
-outside world goes through `ctx`. Each such call is assigned a monotonic
+A workflow is `async fn(workflow::Context, Input) -> Output`. Every interaction
+with the outside world goes through `ctx`. Each such call is assigned a monotonic
 **command sequence number (`seq`)** *at creation time, not poll time*. Because
 the workflow body is deterministic and single-threaded, the Nth `ctx.activity()`
 call is always the same logical operation across replays, so `seq` is a stable
 identifier into history.
 
 ```rust
-struct WfContextInner {
+// crate `workflow`, internal
+struct ContextInner {
     next_seq:   Cell<u64>,
     results:    RefCell<HashMap<u64, CommandResult>>, // seq -> recorded outcome
     scheduled:  RefCell<HashSet<u64>>,                // seqs already emitted this life
     commands:   RefCell<Vec<Command>>,                // emitted this turn, drained by driver
     now:        Cell<SystemTime>,                      // deterministic clock (recorded)
     signals:    RefCell<HashMap<String, VecDeque<Vec<u8>>>>, // name -> buffered signal payloads
+    info:       Info,                                  // this run's identity (§9)
 }
 ```
 
@@ -98,7 +102,7 @@ shape):
 
 ```rust
 impl Future for ActivityFuture {
-    type Output = Result<Vec<u8>, ActivityError>;
+    type Output = Result<Vec<u8>, activity::Error>;
     fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
         // 1. Replay path: result already known -> resolve immediately.
         if let Some(r) = self.ctx.results.borrow().get(&self.seq) {
@@ -162,7 +166,8 @@ makes concurrent branches safe.
     dependent.
 
 These bans are lintable and should eventually be enforced by a `#[workflow]`
-macro or a clippy lint. Until then they are a documented contract.
+macro or a clippy lint (a `workflow-macros` crate, deferred to pass 5). Until
+then they are a documented contract.
 
 ### 4.3 Cancellation of losing branches (v1 semantics)
 
@@ -182,6 +187,7 @@ the stack-suspension work, so there is no dispatcher loop or yield primitive to
 write.
 
 ```rust
+// crate `workflow`
 fn run_turn(wf: &mut WorkflowState) -> Vec<Command> {
     // Precondition: caller has applied AT MOST ONE new event (completion or
     // inbound) into wf.ctx before calling run_turn.
@@ -198,13 +204,17 @@ fn run_turn(wf: &mut WorkflowState) -> Vec<Command> {
 }
 ```
 
+`run_turn` is a pure function over `workflow` types — it needs no backend and no
+tokio, so the determinism tests for passes 1–4 drive it directly with synthetic
+event sequences inside the `workflow` crate.
+
 ---
 
 ## 5. Engine architecture
 
 Three concerns, all on tokio, coordinated through SQLite tables. Workflow
 **decisions** are serialized globally (parallelism = 1 across workflows);
-activity **execution** runs in parallel.
+activity **execution** runs in parallel. All of this lives in the `engine` crate.
 
 ### 5.1 Workflow driver (single-threaded decision loop)
 
@@ -228,14 +238,17 @@ Running the decision loop single-threaded means one writer on history, no
 concurrent SQLite write transactions, and no lock discipline around the per-run
 results map. This is a deliberate simplification that desktop scale permits.
 
-### 5.2 Activity workers (parallel)
+### 5.2 Activity workers (parallel, at-least-once)
 
 Poll `activity_tasks WHERE status='pending' AND next_run_at <= now`, run the
 registered async fn (real IO, retries via policy), and on completion append
 `ActivityCompleted` / `ActivityFailed` to history and mark the run `runnable`.
 
 Activities are **at-least-once**: if the process dies after the side effect but
-before the result is recorded, the task is re-dispatched. See §9.
+before the result is recorded, the task is re-dispatched. Idempotency is the
+activity author's responsibility, made tractable by the stable idempotency key
+(§8). Retries live in the `activity_tasks` table (attempt count + `next_run_at`
+backoff); only terminal outcomes are written to history.
 
 ### 5.3 Timer service
 
@@ -275,9 +288,9 @@ against the same SQLite file — there is no network. The entrypoint:
 
 ```rust
 engine.signal_workflow(workflow_id, "approve", &payload).await
-    -> Result<(), SignalError>;
+    -> Result<(), engine::SignalError>;
 // or, by run, via a handle:
-handle.signal("approve", &payload).await -> Result<(), SignalError>;
+handle.signal("approve", &payload).await -> Result<(), engine::SignalError>;
 ```
 
 It performs a **single transaction**: append `SignalReceived { name, payload }`
@@ -356,9 +369,11 @@ pipeline that makes adding it cheap.
 
 ## 7. Host / IPC API surface
 
-This is the host→engine surface the Tauri frontend drives over IPC. It is
-distinct from the workflow-authoring surface (§10). All entrypoints are ordinary
-in-process async calls returning typed `Result`s the IPC layer can forward.
+This is the host→engine surface the Tauri frontend drives over IPC, exposed by
+the `engine` crate (and realized as `#[tauri::command]`s in `src-tauri/`, §10).
+It is distinct from the workflow-authoring surface (§9). All entrypoints are
+ordinary in-process async calls returning typed `Result`s the IPC layer can
+forward.
 
 ### 7.1 StartWorkflow
 
@@ -390,10 +405,12 @@ engine.on_run_completed(|event: RunCompleted| { /* Tauri re-emits to frontend */
 // RunCompleted { run_id, workflow_id, status, result }
 ```
 
-In-process, `handle.result().await` remains the primitive (it is implemented on
-top of the same signal that the run is terminal). The observer hook is
-deliberately generic — a future progress-stream or query feature (both non-goals
-now) can extend the same seam rather than introduce a new one.
+The `src-tauri` crate adapts this to `app_handle.emit(...)`. In-process,
+`handle.result().await` remains the primitive (implemented on top of the same
+terminal signal). The hook is deliberately generic — a future progress-stream or
+query feature (both non-goals now) can extend the same seam rather than introduce
+a new one. The `engine` crate takes no `tauri` dependency; the adaptation lives
+entirely in `src-tauri`.
 
 ### 7.4 List / describe (trivial reads)
 
@@ -417,53 +434,45 @@ The contract is the same split Temporal gives:
 
 Idempotency is therefore the activity author's responsibility, and the engine
 makes it tractable by handing each activity a **stable idempotency key** that is
-identical across retries and re-deliveries:
+identical across retries and re-deliveries. It is derived from the activity's
+`Info` (§9):
 
 ```
-idempotency_key = "{run_id}:{seq}"
+idempotency_key = "{run_id}:{seq}"   // = info().workflow_execution.run_id : info().activity_id
 ```
 
 Activities use it at their side-effect boundary (payment provider idempotency
 key, `INSERT ... ON CONFLICT`, dedupe table, etc.).
 
 ```rust
-async fn charge(ctx: ActivityContext, input: ChargeInput) -> Result<Receipt, ActivityError> {
+async fn charge(ctx: activity::Context, input: ChargeInput) -> Result<Receipt, activity::Error> {
     let key = ctx.idempotency_key(); // stable across attempts/redeliveries
     stripe.charge(&input, idempotency = key).await
 }
 ```
 
-Retries live in the `activity_tasks` table (attempt count + `next_run_at`
-backoff). Only terminal outcomes (`ActivityCompleted` / `ActivityFailed` after
-the policy is exhausted) are written to history; intermediate retries stay in the
-task table.
-
 ---
 
-## 9. Activity workers and at-least-once execution
+## 9. Workflow / activity API surface
 
-(See §5.2.) Activities run on a parallel tokio pool. The at-least-once guarantee
-means a crash between side effect and result append re-dispatches the task; the
-stable idempotency key (§8) is how the activity author makes that safe.
-
----
-
-## 10. Workflow / activity API surface
-
-This is the part that must remain stable across the desktop→cloud migration.
+This is the part that must remain stable across the desktop→cloud migration. The
+two namespaces mirror Temporal's Go SDK `workflow.` / `activity.` packages, and
+map onto the `workflow` and `activity` crates (§10).
 
 ```rust
 // --- Workflow: deterministic, only touches the world through `ctx` ---
-async fn order_workflow(ctx: WfContext, input: OrderInput) -> Result<OrderResult, WfError> {
+async fn order_workflow(ctx: workflow::Context, input: OrderInput)
+    -> Result<OrderResult, OrderError>
+{
     let receipt = ctx.activity::<Charge>(ChargeInput { card: input.card, cents: input.total })
-        .retry(RetryPolicy::exponential(5))
+        .retry(workflow::RetryPolicy::exponential(5))
         .await?;
 
     // Wait for human approval, or escalate after a day.
     let approvals = ctx.signal_channel::<Approval>("approve");
     select_biased! {
         a = approvals.recv() => { a?; }
-        _ = ctx.sleep(Duration::from_secs(86_400)) => return Err(WfError::ApprovalTimeout),
+        _ = ctx.sleep(Duration::from_secs(86_400)) => return Err(OrderError::ApprovalTimeout),
     }
 
     let shipment = ctx.child_workflow::<ShipWorkflow>(ShipInput::from(&input)).await?;
@@ -471,7 +480,7 @@ async fn order_workflow(ctx: WfContext, input: OrderInput) -> Result<OrderResult
 }
 
 // --- Activity: ordinary async fn, real IO and nondeterminism allowed ---
-async fn charge(ctx: ActivityContext, input: ChargeInput) -> Result<Receipt, ActivityError> {
+async fn charge(ctx: activity::Context, input: ChargeInput) -> Result<Receipt, activity::Error> {
     let key = ctx.idempotency_key();
     stripe.charge(&input, idempotency = key).await
 }
@@ -494,19 +503,65 @@ let handle = engine
 let result: OrderResult = handle.result().await?; // awaits durable completion (in-process)
 ```
 
-### Concurrency helpers exposed on `ctx`
+`OrderWorkflow` / `Charge` are types implementing the marker traits
+`workflow::Definition` / `activity::Definition` (named `Definition` rather than
+`Workflow`/`Activity` to avoid stuttering the crate name). The trait ties a type
+to its input/output types, a stable type name (used by the registry and replay),
+and its handler fn.
+
+### Execution identity — `info()`
+
+Both contexts expose their identity, mirroring `workflow.GetInfo` /
+`activity.GetInfo`. The shared id-pair `Execution` is defined in the `activity`
+crate (the leaf) and re-exported as `workflow::Execution`.
+
+```rust
+pub struct Execution {           // Go: WorkflowExecution
+    pub workflow_id: String,     // user-facing id        (.ID)
+    pub run_id:      String,     // this execution's run  (.RunID)
+}
+
+// crate `workflow`
+pub struct Info {                // Go: workflow.Info
+    pub execution:     Execution,
+    pub parent:        Option<Execution>,  // set for child workflows
+    pub workflow_type: String,
+}
+impl workflow::Context { pub fn info(&self) -> &workflow::Info { /* ... */ } }
+
+// crate `activity`
+pub struct Info {                // Go: activity.ActivityInfo
+    pub execution:     Execution,
+    pub activity_id:   String,   // the scheduling command `seq`, stringified
+    pub activity_type: String,
+    pub attempt:       u32,       // from activity_tasks.attempt
+}
+impl activity::Context {
+    pub fn info(&self) -> &activity::Info { /* ... */ }
+    pub fn idempotency_key(&self) -> String {       // convenience over info(); §8
+        let i = self.info();
+        format!("{}:{}", i.execution.run_id, i.activity_id)
+    }
+}
+```
+
+The engine populates `info` when it constructs a context — at workflow
+start/replay and at each activity dispatch — so both stay backend-agnostic data.
+
+### Concurrency helpers exposed on `workflow::Context`
 
 - `ctx.activity::<A>(input)` → awaitable, with `.retry(..)`.
 - `ctx.child_workflow::<W>(input)` → awaitable.
 - `ctx.sleep(dur)` / `ctx.timer(dur)`.
 - `ctx.now()` / `ctx.random()` — deterministic, recorded.
+- `ctx.info()` — this run's `workflow::Info`.
 - `ctx.signal_channel::<T>(name)` → idempotent-by-name channel; `.recv()` awaits
   one buffered signal (§6.3).
 - `ctx.spawn(future) -> SpawnHandle` — detached branch (§4.4).
 - Use `join!` / `try_join!` / `select_biased!` over these; never `select!` or
   `FuturesUnordered`.
 
-### 10.1 Rust ↔ Temporal Go SDK mapping
+### 9.1 Rust ↔ Temporal Go SDK mapping
 
 The Rust surface is kept idiomatic; this table records the intended translation
 so workflow logic ports mechanically to the Go SDK.
@@ -517,23 +572,78 @@ so workflow logic ports mechanically to the Go SDK.
 | `ctx.child_workflow::<W>(input).await` | `workflow.ExecuteChildWorkflow(ctx, W, input).Get(ctx, &res)` |
 | `ctx.sleep(dur).await` / `ctx.timer(dur)` | `workflow.Sleep(ctx, dur)` / `workflow.NewTimer(ctx, dur)` |
 | `ctx.now()` | `workflow.Now(ctx)` |
-| `ctx.random()` | `workflow.SideEffect` / `workflow.Now`-seeded RNG (recorded) |
+| `ctx.random()` | `workflow.SideEffect` / recorded RNG |
+| `ctx.info()` | `workflow.GetInfo(ctx)` |
+| `activity::Context::info()` | `activity.GetInfo(ctx)` |
+| `info().execution` (`.workflow_id` / `.run_id`) | `.WorkflowExecution` (`.ID` / `.RunID`) |
+| `workflow::Info.parent` | `WorkflowInfo.ParentWorkflowExecution` |
 | `ctx.signal_channel::<T>(name)` | `workflow.GetSignalChannel(ctx, name)` |
 | `channel.recv().await` | `ch.Receive(ctx, &v)` |
 | `select_biased! { ... }` | `workflow.NewSelector(ctx)` + `AddReceive` / `AddFuture` (deterministic by registration order) |
 | `ctx.spawn(fut)` | `workflow.Go(ctx, fn)` |
 | `ctx.idempotency_key()` (activity) | `activity.GetInfo(ctx)` identity (`WorkflowID:ActivityID`) |
 | `ctx.patched("id")` (reserved, §14) | `workflow.GetVersion(ctx, "id", min, max)` |
+| `A: activity::Definition` / `W: workflow::Definition` | activity / workflow registration |
 | `engine.start_workflow::<W>(..)` | `Client.ExecuteWorkflow` |
 | `engine.signal_workflow(id, name, p)` | `Client.SignalWorkflow` |
 | `engine.cancel_workflow(id)` (reserved, §6.4) | `Client.CancelWorkflow` |
 
 ---
 
+## 10. Code structure / workspace layout
+
+A Cargo workspace at the repo root, anchored on the standard Tauri layout. The
+crate split is the *physical* enforcement of the migration boundary (§15): the
+backend-agnostic surface is its own crate, so "workflow code imports neither
+backend" is a compile constraint, not a convention.
+
+```
+/                       # Tauri app root (frontend: package.json, src/, index.html)
+                        #   — added when the app is scaffolded
+/src-tauri/             # Tauri host crate: #[tauri::command] handlers, managed
+                        #   engine State, adapts the completion observer ->
+                        #   app_handle.emit. Realizes §7. Added when the app is wired up.
+/crates/
+  activity/   # leaf. activity::{Context, Info, Error, Definition}, `Execution`
+              #   (defined here), idempotency key. Mirrors Go's `activity` package.
+  workflow/   # -> activity. workflow::{Context, Info, Definition, RetryPolicy,
+              #   Command, Event}, signal channel, spawn, run_turn (pure replay).
+              #   Re-exports Execution. Mirrors Go's `workflow` package.
+  engine/     # -> workflow (+ activity). Driver loop, worker pool, timer service,
+              #   sticky cache, completion observer, host/IPC entrypoints (§7).
+              #   DEFINES the History + TaskQueue traits; generic over them.
+  persist/    # -> engine (impl the two traits) + workflow (serialize Event).
+              #   SQLite History + TaskQueue.
+/examples/    # runnable sample workflows + integration tests, until src-tauri exists
+/Cargo.toml   # [workspace] members = ["crates/*", "examples/*"]  (+ "src-tauri" later)
+```
+
+**Dependency direction (strict DAG, no cycles):**
+`activity ← workflow ← engine ← persist`, plus `persist → workflow`. The
+app/`src-tauri` sits on top and is the *only* crate that knows both `engine` and
+`persist` — it wires a `persist` backend into the generic `engine`. **`engine`
+never depends on `persist`**, which is what keeps the §15 swap to "reimplement
+the two traits" honest (a cloud backend is just another crate implementing
+`engine::History` / `engine::TaskQueue`).
+
+**Why `Command`/`Event`/`run_turn` live in `workflow`, not `engine`:** workflow
+futures *emit* `Command`s and `run_turn` *applies* `Event`s into them, so the
+replay protocol sits with the futures and `engine` depends on `workflow` — never
+the reverse. Bonus: the pure determinism tests (passes 1–4) live inside the
+`workflow` crate.
+
+**Conventions.** Crates are internal: `publish = false`, path deps, shared
+versions via `[workspace.dependencies]`; no crates.io ceremony. Type names
+**never stutter the crate name** (`workflow::Context`, not `WfContext`; marker
+traits are `workflow::Definition` / `activity::Definition`). Engine crates take
+**no `tauri` dependency**; Tauri idioms live only at the `src-tauri` edge.
+
+---
+
 ## 11. SQLite schema
 
 Event-sourced, with derived task tables so the engine has a cheap "what's
-runnable" query instead of scanning history.
+runnable" query instead of scanning history. Implemented by the `persist` crate.
 
 ```sql
 CREATE TABLE executions (
@@ -639,16 +749,18 @@ timer + concurrency machinery from pass 2.
 
 ### Pass 1 — Replay core (activities only)
 
-The spine: `WfContext` + `seq`, `history`, cold replay, the one-event-per-turn
-loop (degenerate/sequential here), the atomic decision-turn transaction, activity
-scheduling/completion/failure, retries + `idempotency_key`, and the
+Stand up the workspace (`workflow` / `activity` / `engine` / `persist` +
+`examples`; `src-tauri` deferred). The spine: `workflow::Context` + `seq`,
+`history`, cold replay, the one-event-per-turn loop (degenerate/sequential here),
+the atomic decision-turn transaction, activity scheduling/completion/failure,
+retries + `idempotency_key`, the `info()` surface on both contexts, and the
 nondeterminism divergence check. Single workflow, sequential `await`.
 StartWorkflow (§7.1) and the completion observer hook (§7.3) land here, the hook
 firing on terminal status.
 
 *Acceptance:* an activity-only workflow runs to completion; killing the process
 mid-run cold-replays to the same logical position; a forced cache-evict
-reproduces an identical command stream.
+reproduces an identical command stream; `info()` reports the right ids.
 
 ### Pass 2 — Time & concurrency
 
@@ -675,7 +787,7 @@ before/after a crash replay identically; signaling a completed run returns
 ### Pass 4 — Child workflows
 
 Parent/child executions, `ChildCompleted` into the parent's history, parent
-re-marked runnable.
+re-marked runnable. `workflow::Info.parent` populated for children.
 
 *Acceptance:* a parent awaiting a child completes when the child does, across
 cold recovery of either.
@@ -683,11 +795,12 @@ cold recovery of either.
 ### Pass 5 — Durability hardening & migration seam
 
 Sticky-cache vs cold-replay equivalence test as a standing guard; the
-`ctx.patched("change-id")` hook (§14); the `History` / `TaskQueue` trait boundary
-made explicit (§15); divergence-check hardening.
+`ctx.patched("change-id")` hook (§14); the `engine::History` / `engine::TaskQueue`
+trait boundary made explicit; divergence-check hardening; optional
+`workflow-macros` crate for the `#[workflow]` lint.
 
 *Acceptance:* the cache/cold-replay equivalence test passes as a CI guard; the
-two traits compile as the only seam the SQLite backend implements.
+two traits compile as the only seam `persist` implements.
 
 ---
 
@@ -695,7 +808,7 @@ two traits compile as the only seam the SQLite backend implements.
 
 - **Determinism enforcement** can't be fully achieved at compile time in Rust.
   Rely on convention + the runtime divergence check (Invariant 9) + an eventual
-  `#[workflow]` lint. Document the contract hard.
+  `#[workflow]` lint (`workflow-macros`, pass 5). Document the contract hard.
 - **Versioning / code change vs in-flight histories.** Changing a workflow's
   shape can break replay of running instances. For desktop iteration it's
   acceptable to drain or abandon running workflows on code change, but leave a
@@ -719,14 +832,14 @@ two traits compile as the only seam the SQLite backend implements.
 ## 15. Cloud migration boundary
 
 Keep two traits clean and the desktop↔cloud swap is "reimplement two traits,"
-not a rewrite:
+not a rewrite. Both are defined in the `engine` crate:
 
 - `History` — append events (including inbound events), read history for a run,
   atomic decision-turn commit.
 - `TaskQueue` — enqueue/lease/complete activity tasks and timers; mark runnable.
 
-The SQLite engine is one implementation of these; a server-backed engine is
-another. **Workflow and activity code (§10) imports neither** — it only sees
-`WfContext` / `ActivityContext`, so it carries over unchanged. The host/IPC
-surface (§7) is desktop-specific glue and is expected to be re-implemented per
-host.
+The `persist` crate is one implementation of these; a server-backed crate is
+another. **Workflow and activity code (§9) depends only on the `workflow` /
+`activity` crates** — neither imports `engine` or `persist`, so it carries over
+unchanged. The host/IPC surface (§7) and its `src-tauri` adapter are
+desktop-specific glue, expected to be re-implemented per host.
