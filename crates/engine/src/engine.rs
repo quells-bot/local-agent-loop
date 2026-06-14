@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 
-use crate::{ExecStatus, History, NewActivityTask, TaskQueue, TurnCommit};
+use crate::{ExecStatus, History, NewActivityTask, NewTimer, TaskQueue, TurnCommit};
 
 /// Options for starting a workflow (spec §7.1). `id` is the dedup key.
 #[derive(Default)]
@@ -140,12 +140,29 @@ impl Engine {
             .await?
             .ok_or_else(|| anyhow::anyhow!("runnable run {run_id} has no execution row"))?;
 
+        if meta.status != ExecStatus::Running {
+            // Already terminal: a late completion re-marked it runnable. Preserve the
+            // stored result and only clear the stale runnable flag (Inv 5).
+            let existing = self.history.find_execution(&meta.workflow_id).await?;
+            let result = existing.and_then(|(_, _, r)| r);
+            let commit = TurnCommit {
+                events: Vec::new(),
+                new_tasks: Vec::new(),
+                new_timers: Vec::new(),
+                status: meta.status,
+                result,
+            };
+            self.history.commit_turn(&run_id, &commit).await?;
+            return Ok(true);
+        }
+
         let stored = self.history.read_history(&run_id).await?;
         let events: Vec<workflow::Event> = stored.into_iter().map(|s| s.event).collect();
         let recorded: HashSet<u64> = events
             .iter()
             .filter_map(|e| match e {
-                workflow::Event::ActivityScheduled { seq, .. } => Some(*seq),
+                workflow::Event::ActivityScheduled { seq, .. }
+                | workflow::Event::TimerStarted { seq, .. } => Some(*seq),
                 _ => None,
             })
             .collect();
@@ -170,23 +187,40 @@ impl Engine {
         // Persist only commands not already recorded in history.
         let mut new_events = Vec::new();
         let mut new_tasks = Vec::new();
+        let mut new_timers = Vec::new();
         for cmd in &outcome.commands {
-            let workflow::Command::ScheduleActivity { seq, activity_type, input, retry } = cmd;
-            if recorded.contains(seq) {
-                continue;
+            match cmd {
+                workflow::Command::ScheduleActivity { seq, activity_type, input, retry } => {
+                    if recorded.contains(seq) {
+                        continue;
+                    }
+                    new_events.push(workflow::Event::ActivityScheduled {
+                        seq: *seq,
+                        activity_type: activity_type.clone(),
+                        input: input.clone(),
+                        retry: retry.clone(),
+                    });
+                    new_tasks.push(NewActivityTask {
+                        seq: *seq as i64,
+                        activity_type: activity_type.clone(),
+                        input: input.clone(),
+                        next_run_at: 0,
+                    });
+                }
+                workflow::Command::StartTimer { seq, duration_ms } => {
+                    if recorded.contains(seq) {
+                        continue;
+                    }
+                    new_events.push(workflow::Event::TimerStarted {
+                        seq: *seq,
+                        duration_ms: *duration_ms,
+                    });
+                    new_timers.push(NewTimer {
+                        seq: *seq as i64,
+                        fire_at: now_ms() + *duration_ms as i64,
+                    });
+                }
             }
-            new_events.push(workflow::Event::ActivityScheduled {
-                seq: *seq,
-                activity_type: activity_type.clone(),
-                input: input.clone(),
-                retry: retry.clone(),
-            });
-            new_tasks.push(NewActivityTask {
-                seq: *seq as i64,
-                activity_type: activity_type.clone(),
-                input: input.clone(),
-                next_run_at: 0,
-            });
         }
 
         let (status, result) = match &outcome.completion {
@@ -195,7 +229,7 @@ impl Engine {
             None => (ExecStatus::Running, None),
         };
 
-        let commit = TurnCommit { events: new_events, new_tasks, status, result: result.clone() };
+        let commit = TurnCommit { events: new_events, new_tasks, new_timers, status, result: result.clone() };
         self.history.commit_turn(&run_id, &commit).await?;
 
         if status != ExecStatus::Running {
@@ -270,6 +304,13 @@ impl Engine {
 }
 
 impl Engine {
+    /// Fire one due timer, if any (spec §5.3). Returns false if none was due.
+    pub async fn process_one_timer(&self) -> anyhow::Result<bool> {
+        self.queue.fire_due_timer().await
+    }
+}
+
+impl Engine {
     /// Spawn the driver and activity-worker loops as background tokio tasks and
     /// return a shared handle. Use the `process_one_*` methods directly in tests
     /// for deterministic stepping.
@@ -298,6 +339,20 @@ impl Engine {
                     Ok(false) => tokio::time::sleep(Duration::from_millis(5)).await,
                     Err(err) => {
                         eprintln!("worker error: {err:#}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        });
+
+        let timers = engine.clone();
+        tokio::spawn(async move {
+            loop {
+                match timers.process_one_timer().await {
+                    Ok(true) => {}
+                    Ok(false) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Err(err) => {
+                        eprintln!("timer error: {err:#}");
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                 }

@@ -55,4 +55,10 @@ pub trait TaskQueue: Send + Sync {
         lease: &ActivityLease,
         next_run_at: i64,
     ) -> anyhow::Result<()>;
+
+    /// Atomically fire one timer whose `fire_at <= now`: append `TimerFired`,
+    /// delete the timer row, and mark the run runnable (spec §5.3). Returns false
+    /// if no timer is due. Single combined method (no lease/retry — timers carry no
+    /// side effect) so two service iterations cannot double-fire the same timer.
+    async fn fire_due_timer(&self) -> anyhow::Result<bool>;
 }
