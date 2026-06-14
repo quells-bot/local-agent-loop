@@ -31,3 +31,6 @@ pub use def::Definition;
 
 mod state;
 pub use state::WorkflowState;
+
+mod replay;
+pub use replay::{cold_replay, Nondeterminism, ReplayOutcome};
