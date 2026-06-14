@@ -34,11 +34,37 @@ mod tests {
             Event::ActivityCompleted { seq: 1, output: vec![] }.kind(),
             "ActivityCompleted"
         );
+        assert_eq!(
+            Event::ActivityScheduled {
+                seq: 0,
+                activity_type: "T".into(),
+                input: vec![],
+                retry: RetryPolicy::none(),
+            }
+            .kind(),
+            "ActivityScheduled"
+        );
+        assert_eq!(
+            Event::ActivityFailed { seq: 3, error: activity::Error::fatal("x") }.kind(),
+            "ActivityFailed"
+        );
     }
 
     #[test]
     fn round_trips_through_json() {
         let e = Event::ActivityFailed { seq: 2, error: activity::Error::fatal("x") };
+        let back: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(e, back);
+    }
+
+    #[test]
+    fn activity_scheduled_round_trips_with_nested_retry() {
+        let e = Event::ActivityScheduled {
+            seq: 1,
+            activity_type: "Add".into(),
+            input: b"[1,2]".to_vec(),
+            retry: RetryPolicy::exponential(3),
+        };
         let back: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(e, back);
     }

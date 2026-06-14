@@ -18,6 +18,7 @@ impl RetryPolicy {
 
     /// Delay before the given 1-based attempt. Attempt 1 (first try) has no delay.
     pub fn backoff_ms(&self, attempt: u32) -> u64 {
+        debug_assert!(self.multiplier >= 1, "RetryPolicy.multiplier must be >= 1");
         if attempt <= 1 {
             return 0;
         }
