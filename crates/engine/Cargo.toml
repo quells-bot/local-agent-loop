@@ -1,0 +1,9 @@
+[package]
+name = "engine"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+workflow = { path = "../workflow" }
+activity = { path = "../activity" }
