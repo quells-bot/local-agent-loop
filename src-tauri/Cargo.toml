@@ -1,0 +1,26 @@
+[package]
+name = "app"
+version = "0.0.0"
+description = "Workflow Chat — Tauri host"
+edition = "2021"
+publish = false
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin (Windows cargo issue,
+# see https://github.com/rust-lang/cargo/issues/8519).
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri      = { version = "2", features = [] }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = "1"
+tokio      = { workspace = true }
+engine     = { path = "../crates/engine" }
+persist    = { path = "../crates/persist" }
+demo       = { path = "../crates/demo" }
+workflow   = { path = "../crates/workflow" }
