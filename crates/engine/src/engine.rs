@@ -277,6 +277,8 @@ impl Engine {
                     .dead_letter(
                         &run_id,
                         &meta.workflow_id,
+                        meta.parent_run_id.as_deref(),
+                        meta.parent_seq,
                         format!("unregistered workflow {}", meta.workflow_type),
                     )
                     .await;
@@ -290,6 +292,8 @@ impl Engine {
                     .dead_letter(
                         &run_id,
                         &meta.workflow_id,
+                        meta.parent_run_id.as_deref(),
+                        meta.parent_seq,
                         format!("nondeterminism in {}: {e}", meta.workflow_type),
                     )
                     .await;
@@ -421,20 +425,39 @@ impl Engine {
     /// divergence). Commits a `Failed` turn — which clears `runnable`, so the driver
     /// stops retrying — and fires the completion observer (spec §5.1, §14). Returns
     /// `Ok(true)` so the caller's loop continues without the error backoff.
+    ///
+    /// If the dead-lettered run is a child (`parent_run_id`/`parent_seq` set), it
+    /// notifies the parent with `ChildResult::Failed` in the SAME transaction (spec
+    /// §5.4): a dead-letter is terminal, so the parent's `ChildFuture` must resolve to
+    /// Failed rather than park forever. This mirrors the terminal-failure notify in
+    /// `process_one_runnable`. Safe from double-firing because `dead_letter` only runs
+    /// for a `Running` run (its first and only terminal commit).
     async fn dead_letter(
         &self,
         run_id: &str,
         workflow_id: &str,
+        parent_run_id: Option<&str>,
+        parent_seq: Option<i64>,
         message: String,
     ) -> anyhow::Result<bool> {
         let err = workflow::Error::new(message);
         let result = Some(serde_json::to_vec(&err)?);
+        let parent_notify = match (parent_run_id, parent_seq) {
+            (Some(prid), Some(pseq)) => Some(ParentNotify {
+                parent_run_id: prid.to_string(),
+                event: workflow::Event::ChildCompleted {
+                    seq: pseq as u64,
+                    result: workflow::ChildResult::Failed(err.clone()),
+                },
+            }),
+            _ => None,
+        };
         let commit = TurnCommit {
             events: Vec::new(),
             new_tasks: Vec::new(),
             new_timers: Vec::new(),
             new_children: Vec::new(),
-            parent_notify: None,
+            parent_notify,
             status: ExecStatus::Failed,
             result: result.clone(),
         };
