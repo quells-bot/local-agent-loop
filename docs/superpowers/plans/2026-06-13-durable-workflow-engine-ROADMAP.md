@@ -130,7 +130,8 @@ pub enum Event {                        // history record, applied into ctx + pe
     ActivityFailed    { seq: u64, error: activity::Error },
     TimerStarted      { seq: u64, duration_ms: u64 },   // 2a (done)
     TimerFired        { seq: u64 },                      // 2a (done)
-    // Pass 3: SignalReceived; Pass 4: ChildCompleted;
+    SignalReceived { name: String, payload: Vec<u8> },           // 3a (done)
+    // Pass 4: ChildCompleted;
     // reserved: WorkflowCancelRequested
 }                                       // derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize
                                         // method: kind(&self) -> &'static str
@@ -144,9 +145,13 @@ pub struct Error { pub message: String }      // workflow failure
 pub struct Context { /* Rc<ContextInner>; minimal in 1a, replay state added in 1b */ }
 //   info() -> &Info  (1a);  activity::<A>(input) -> ActivityFuture, now(), random() (1b)
 //   timer/sleep(dur) -> TimerFuture (2a);  spawn(fut) -> SpawnHandle<T> (2b, workflow.Go analog)
+//   signal_channel() -> SignalChannel<T> (3a);  apply_signal(Event::SignalReceived) (3a)
 
 pub struct SpawnHandle<T> { /* Rc<RefCell<Option<T>>>; resolves to T when the branch completes */ }  // 2b
 // WorkflowState drives main + spawned branches to quiescence per turn (ordered scheduler, §4.4).  // 2b
+
+pub struct SignalChannel<T> { /* Arc<SignalRecv<T>> */ }                    // 3a
+pub struct SignalRecv<T> { /* blocking recv / poll */ }                     // 3a
 
 // `?Send`: workflow futures hold Rc/RefCell (single-threaded loop), so they are
 // NOT Send. Associated types are `'static` (not Send — values never cross threads).
@@ -208,7 +213,7 @@ sweeps to requeue tasks whose lease has expired.
 | 2a | Timers (`sleep`/`timer` + service) | §4, §5.3 | `2026-06-14-pass-2a-timers.md` | done |
 | 2b | Combinators + spawn scheduler | §4.2, §4.4 | `2026-06-14-pass-2b-combinators-and-spawn.md` | done |
 | 2c | Robustness hardening (lease-expiry + dead-letter) | §5.1, §5.2, §14 | `2026-06-14-pass-2c-hardening.md` | done |
-| 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | _(JIT)_ | not yet authored |
+| 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | `2026-06-14-pass-3a-inbound-events-and-signal-channel.md` | done |
 | 3b | `signal_workflow` + signal-or-timeout e2e | §6.1, §7.2 | _(JIT)_ | not yet authored |
 | 4a | Child workflows | §5.4, §9(info.parent) | _(JIT)_ | not yet authored |
 | 5a | Cache vs cold-replay equivalence + hardening | §12, §14 | _(JIT)_ | not yet authored |
