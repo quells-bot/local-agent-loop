@@ -182,6 +182,7 @@ pub struct NewTimer { pub seq: i64, pub fire_at: i64 }    // 2a (done)
     async fn complete_activity(&self, lease: &ActivityLease, result: CommandResult) -> Result<()>;
     async fn reschedule_activity(&self, lease: &ActivityLease, next_run_at: i64) -> Result<()>;
     async fn fire_due_timer(&self) -> Result<bool>;   // 2a (done)
+    async fn reclaim_expired_activities(&self) -> Result<u64>;   // 2c (done)
 }
 pub enum SignalError { WorkflowNotFound, NotRunning }   // Pass 3
 ```
@@ -189,6 +190,10 @@ pub enum SignalError { WorkflowNotFound, NotRunning }   // Pass 3
 (`anyhow::Result` elided as `Result` above. Supporting types — `ExecStatus`,
 `NewActivityTask`, `ActivityLease`, `CreateOutcome`, `RunMeta` — are defined in
 chunk **1c**.)
+
+2c (done) also added the `activity_tasks.lease_expires_at INTEGER` column (NULL
+when pending; epoch-ms deadline when leased), which `reclaim_expired_activities`
+sweeps to requeue tasks whose lease has expired.
 
 ---
 
@@ -202,7 +207,7 @@ chunk **1c**.)
 | 1d | Driver + workers + start + observer | §5, §6.1(start), §7, §8 | `archive/2026-06-13-pass-1d-driver-and-workers.md` | done |
 | 2a | Timers (`sleep`/`timer` + service) | §4, §5.3 | `2026-06-14-pass-2a-timers.md` | done |
 | 2b | Combinators + spawn scheduler | §4.2, §4.4 | `2026-06-14-pass-2b-combinators-and-spawn.md` | done |
-| 2c | Robustness hardening (lease-expiry + dead-letter) | §5.1, §5.2, §14 | `2026-06-14-pass-2c-hardening.md` | authored |
+| 2c | Robustness hardening (lease-expiry + dead-letter) | §5.1, §5.2, §14 | `2026-06-14-pass-2c-hardening.md` | done |
 | 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | _(JIT)_ | not yet authored |
 | 3b | `signal_workflow` + signal-or-timeout e2e | §6.1, §7.2 | _(JIT)_ | not yet authored |
 | 4a | Child workflows | §5.4, §9(info.parent) | _(JIT)_ | not yet authored |
