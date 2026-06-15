@@ -54,9 +54,70 @@ pub fn cold_replay<W: crate::Definition>(
         Signal(String, Vec<u8>),
         Child(u64, Result<Vec<u8>, crate::Error>),
     }
-    let mut recorded_sched: HashMap<u64, (String, Vec<u8>)> = HashMap::new();
-    let mut recorded_timer: HashMap<u64, u64> = HashMap::new(); // seq -> duration_ms
-    let mut recorded_child: HashMap<u64, (String, Vec<u8>)> = HashMap::new();
+    // One recorded command per seq, carrying its kind + payload, so the divergence
+    // check (Invariant 9) catches a *kind* mismatch (activity-vs-timer-vs-child at the
+    // same seq), not just a same-kind payload mismatch.
+    #[derive(PartialEq, Eq)]
+    enum RecordedCmd {
+        Activity {
+            activity_type: String,
+            input: Vec<u8>,
+        },
+        Timer {
+            duration_ms: u64,
+        },
+        Child {
+            workflow_type: String,
+            input: Vec<u8>,
+        },
+    }
+    impl RecordedCmd {
+        fn describe(&self) -> String {
+            match self {
+                RecordedCmd::Activity { activity_type, .. } => format!("activity {activity_type}"),
+                RecordedCmd::Timer { duration_ms } => format!("timer {duration_ms}ms"),
+                RecordedCmd::Child { workflow_type, .. } => format!("child {workflow_type}"),
+            }
+        }
+    }
+    // Map an emitted command to (seq, RecordedCmd) for comparison. Returns None for
+    // commands that carry no seq and are divergence-exempt (none today; a later pass's
+    // RecordPatch will add a None arm here).
+    fn as_recorded(cmd: &Command) -> Option<(u64, RecordedCmd)> {
+        match cmd {
+            Command::ScheduleActivity {
+                seq,
+                activity_type,
+                input,
+                ..
+            } => Some((
+                *seq,
+                RecordedCmd::Activity {
+                    activity_type: activity_type.clone(),
+                    input: input.clone(),
+                },
+            )),
+            Command::StartTimer { seq, duration_ms } => Some((
+                *seq,
+                RecordedCmd::Timer {
+                    duration_ms: *duration_ms,
+                },
+            )),
+            Command::StartChild {
+                seq,
+                workflow_type,
+                input,
+            } => Some((
+                *seq,
+                RecordedCmd::Child {
+                    workflow_type: workflow_type.clone(),
+                    input: input.clone(),
+                },
+            )),
+        }
+    }
+
+    let mut recorded_cmd: HashMap<u64, RecordedCmd> = HashMap::new();
     let mut applied: Vec<Applied> = Vec::new();
     for ev in history {
         match ev {
@@ -66,7 +127,13 @@ pub fn cold_replay<W: crate::Definition>(
                 input,
                 ..
             } => {
-                recorded_sched.insert(*seq, (activity_type.clone(), input.clone()));
+                recorded_cmd.insert(
+                    *seq,
+                    RecordedCmd::Activity {
+                        activity_type: activity_type.clone(),
+                        input: input.clone(),
+                    },
+                );
             }
             Event::ActivityCompleted { seq, output } => {
                 applied.push(Applied::Result(
@@ -81,7 +148,12 @@ pub fn cold_replay<W: crate::Definition>(
                 ));
             }
             Event::TimerStarted { seq, duration_ms } => {
-                recorded_timer.insert(*seq, *duration_ms);
+                recorded_cmd.insert(
+                    *seq,
+                    RecordedCmd::Timer {
+                        duration_ms: *duration_ms,
+                    },
+                );
             }
             Event::TimerFired { seq } => {
                 applied.push(Applied::Timer(*seq));
@@ -95,7 +167,13 @@ pub fn cold_replay<W: crate::Definition>(
                 workflow_type,
                 input,
             } => {
-                recorded_child.insert(*seq, (workflow_type.clone(), input.clone()));
+                recorded_cmd.insert(
+                    *seq,
+                    RecordedCmd::Child {
+                        workflow_type: workflow_type.clone(),
+                        input: input.clone(),
+                    },
+                );
             }
             Event::ChildCompleted { seq, result } => {
                 applied.push(Applied::Child(*seq, result.clone().into()));
@@ -110,50 +188,17 @@ pub fn cold_replay<W: crate::Definition>(
     loop {
         let poll = state.poll_turn();
         for cmd in state.drain_commands() {
-            match &cmd {
-                Command::ScheduleActivity {
-                    seq,
-                    activity_type,
-                    input,
-                    ..
-                } => {
-                    if let Some((rty, rin)) = recorded_sched.get(seq) {
-                        if rty != activity_type || rin != input {
-                            return Err(Nondeterminism {
-                                seq: *seq,
-                                detail: format!(
-                                    "history recorded schedule of {rty}, workflow emitted {activity_type}"
-                                ),
-                            });
-                        }
-                    }
-                }
-                Command::StartTimer { seq, duration_ms } => {
-                    if let Some(rdur) = recorded_timer.get(seq) {
-                        if rdur != duration_ms {
-                            return Err(Nondeterminism {
-                                seq: *seq,
-                                detail: format!(
-                                    "history recorded timer of {rdur}ms, workflow emitted {duration_ms}ms"
-                                ),
-                            });
-                        }
-                    }
-                }
-                Command::StartChild {
-                    seq,
-                    workflow_type,
-                    input,
-                } => {
-                    if let Some((rty, rin)) = recorded_child.get(seq) {
-                        if rty != workflow_type || rin != input {
-                            return Err(Nondeterminism {
-                                seq: *seq,
-                                detail: format!(
-                                    "history recorded child {rty}, workflow emitted {workflow_type}"
-                                ),
-                            });
-                        }
+            if let Some((seq, emitted)) = as_recorded(&cmd) {
+                if let Some(rec) = recorded_cmd.get(&seq) {
+                    if *rec != emitted {
+                        return Err(Nondeterminism {
+                            seq,
+                            detail: format!(
+                                "history recorded {} at seq {seq}, workflow emitted {}",
+                                rec.describe(),
+                                emitted.describe()
+                            ),
+                        });
                     }
                 }
             }
@@ -899,5 +944,50 @@ mod tests {
         let err = cold_replay::<Parent>(parent_info(), &h).unwrap_err();
         assert_eq!(err.seq, 0);
         assert!(err.detail.contains("Other"));
+    }
+
+    #[test]
+    fn detects_kind_divergence_activity_recorded_timer_in_history() {
+        // History recorded a TIMER at seq 0, but Sum emits an ACTIVITY at seq 0.
+        // Pre-hardening this was silent (the activity map had no seq-0 entry).
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::TimerStarted {
+                seq: 0,
+                duration_ms: 500,
+            },
+        ];
+        let err = cold_replay::<Sum>(info(), &h).unwrap_err();
+        assert_eq!(err.seq, 0);
+        assert!(
+            err.detail.contains("timer") && err.detail.contains("activity"),
+            "detail should name both the recorded kind and the emitted kind, got: {}",
+            err.detail
+        );
+    }
+
+    #[test]
+    fn detects_kind_divergence_child_emitted_activity_recorded() {
+        // History recorded an ACTIVITY at seq 0, but Parent emits a CHILD at seq 0.
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::ActivityScheduled {
+                seq: 0,
+                activity_type: "Add".into(),
+                input: add_input(1, 2),
+                retry: RetryPolicy::none(),
+            },
+        ];
+        let err = cold_replay::<Parent>(parent_info(), &h).unwrap_err();
+        assert_eq!(err.seq, 0);
+        assert!(
+            err.detail.contains("activity") && err.detail.contains("child"),
+            "detail should name both the recorded kind and the emitted kind, got: {}",
+            err.detail
+        );
     }
 }
