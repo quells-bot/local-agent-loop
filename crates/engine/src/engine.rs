@@ -358,6 +358,16 @@ impl Engine {
                         workflow_type: workflow_type.clone(),
                         input: input.clone(),
                     });
+                    // `child_workflow_id` is derived from the parent's workflow_id + the
+                    // StartChild command seq. This is collision-free TODAY because
+                    // `executions` enforces UNIQUE(workflow_id) (so a parent id is never
+                    // reused) and StartChild is emit-once per seq — the same
+                    // {parent_workflow_id, seq} pair never recurs, so the plain INSERT in
+                    // `commit_turn` is safe. WARNING: once continue-as-new (or a
+                    // workflow-id reuse policy) lands, a parent keeps its workflow_id while
+                    // seq resets to 0 across runs, so this derivation WILL collide and the
+                    // plain INSERT will abort the turn. Re-scope the id then (e.g. fold in
+                    // the parent's run_id).
                     new_children.push(NewChild {
                         seq: *seq as i64,
                         child_run_id: uuid::Uuid::new_v4().to_string(),
