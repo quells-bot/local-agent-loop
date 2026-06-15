@@ -1,6 +1,7 @@
 //! Guards spec §15: `History` + `TaskQueue` are the ENTIRE seam a persistence backend
 //! implements. If `persist::Sqlite` ever needs another engine trait to be wired in,
 //! this stops compiling — forcing that new seam to be a deliberate, documented choice.
+//! Spec references below ("§N", "spec §N") point to the 2026-06-13 design spec: docs/superpowers/specs/2026-06-13-durable-workflow-engine-design.md
 
 use engine::{History, TaskQueue};
 use persist::Sqlite;

@@ -1,3 +1,5 @@
+// Spec references below ("§N", "spec §N") point to the 2026-06-13 design spec:
+// docs/superpowers/specs/2026-06-13-durable-workflow-engine-design.md
 use serde::{Deserialize, Serialize};
 
 /// A child workflow's terminal outcome, recorded once in the parent's history as the

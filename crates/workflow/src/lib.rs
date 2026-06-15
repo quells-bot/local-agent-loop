@@ -1,4 +1,6 @@
 //! Workflow-authoring surface + replay protocol (mirrors Go SDK `workflow`).
+//! Spec references below ("§N", "spec §N") point to the 2026-06-13 design spec:
+//! docs/superpowers/specs/2026-06-13-durable-workflow-engine-design.md
 //!
 //! ## Deterministic concurrency contract (spec §4.2)
 //!
