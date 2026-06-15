@@ -52,6 +52,9 @@ impl<T: DeserializeOwned> Future for SignalRecv<T> {
     type Output = Result<T, crate::Error>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        // No waker registration: the driver re-polls after applying each event under
+        // the one-event-per-turn rule (§4.1), so `recv` never needs to wake itself —
+        // identical to the activity/timer futures.
         let me = self.get_mut();
         let popped = me
             .inner
@@ -60,9 +63,11 @@ impl<T: DeserializeOwned> Future for SignalRecv<T> {
             .get_mut(&me.name)
             .and_then(|buf| buf.pop_front());
         match popped {
-            Some(bytes) => Poll::Ready(serde_json::from_slice::<T>(&bytes).map_err(|e| {
-                crate::Error::new(format!("signal '{}' deserialize: {e}", me.name))
-            })),
+            Some(bytes) => {
+                Poll::Ready(serde_json::from_slice::<T>(&bytes).map_err(|e| {
+                    crate::Error::new(format!("signal '{}' deserialize: {e}", me.name))
+                }))
+            }
             None => Poll::Pending,
         }
     }

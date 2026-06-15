@@ -187,7 +187,10 @@ impl Engine {
         name: &str,
         payload: &[u8],
     ) -> Result<(), SignalError> {
-        let outcome = self.history.append_signal(workflow_id, name, payload).await?;
+        let outcome = self
+            .history
+            .append_signal(workflow_id, name, payload)
+            .await?;
         outcome_to_result(outcome)
     }
 }

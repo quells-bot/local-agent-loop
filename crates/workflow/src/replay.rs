@@ -616,8 +616,7 @@ mod tests {
             },
         ];
         let outcome = cold_replay::<WaitApprove>(wait_info(), &h).unwrap();
-        let out: bool =
-            serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        let out: bool = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
         assert!(out);
         assert!(
             outcome.commands.is_empty(),
@@ -686,8 +685,81 @@ mod tests {
         let out: (i64, i64) =
             serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
         assert_eq!(
-            out, (1, 2),
+            out,
+            (1, 2),
             "the Nth recv pops the Nth buffered signal of that name"
+        );
+    }
+
+    // Signal-or-timeout: race an "approve" signal (biased winner) against a sleep.
+    // The interleaved history exercises the TimerStarted echo + SignalReceived inbound
+    // event in one replay — the spec §6.3 motivating pattern.
+    struct SignalOrTimeout;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for SignalOrTimeout {
+        type Input = u64; // timeout in ms
+        type Output = String;
+        const TYPE: &'static str = "SignalOrTimeout";
+        async fn run(ctx: Context, timeout_ms: u64) -> Result<String, Error> {
+            use futures::{select_biased, FutureExt};
+            let approvals = ctx.signal_channel::<bool>("approve");
+            let recv = approvals.recv().fuse();
+            let nap = ctx
+                .sleep(std::time::Duration::from_millis(timeout_ms))
+                .fuse();
+            futures::pin_mut!(recv, nap);
+            let out = select_biased! {
+                a = recv => if a? { "approved" } else { "rejected" },
+                _ = nap => "timed_out",
+            };
+            Ok(out.to_string())
+        }
+    }
+
+    // Replay-determinism guard for the select-biased interleaving: a run that took the
+    // signal branch live, cold-replayed from [WorkflowStarted, TimerStarted, SignalReceived],
+    // must re-emit the SAME StartTimer command (no divergence), apply the inbound signal
+    // one-per-turn, and re-take the signal branch — proving the TimerStarted *echo* is not
+    // miscounted as an applied inbound event (Inv 3/9/10, §6.2).
+    #[test]
+    fn signal_or_timeout_replays_signal_branch_deterministically() {
+        let info = Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            parent: None,
+            workflow_type: "SignalOrTimeout".into(),
+        };
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&86_400_000u64).unwrap(),
+            },
+            // The day-long timer the workflow started on turn 1 (a command echo, NOT an
+            // applied inbound event).
+            Event::TimerStarted {
+                seq: 0,
+                duration_ms: 86_400_000,
+            },
+            // The signal that resolved the biased `recv` branch.
+            Event::SignalReceived {
+                name: "approve".into(),
+                payload: serde_json::to_vec(&true).unwrap(),
+            },
+        ];
+        let outcome = cold_replay::<SignalOrTimeout>(info, &h).unwrap();
+        let out: String = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            out, "approved",
+            "the signal branch wins identically on replay"
+        );
+        assert_eq!(
+            outcome.commands,
+            vec![Command::StartTimer {
+                seq: 0,
+                duration_ms: 86_400_000
+            }],
+            "the StartTimer echo re-emits at the same seq; the signal allocates no command"
         );
     }
 }

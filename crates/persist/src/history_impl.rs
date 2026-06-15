@@ -373,7 +373,9 @@ mod tests {
         };
         db.commit_turn("run-1", &idle).await.unwrap();
         assert_eq!(
-            <Sqlite as engine::TaskQueue>::next_runnable(&db).await.unwrap(),
+            <Sqlite as engine::TaskQueue>::next_runnable(&db)
+                .await
+                .unwrap(),
             None
         );
 
@@ -390,7 +392,9 @@ mod tests {
             other => panic!("expected SignalReceived, got {other:?}"),
         }
         assert_eq!(
-            <Sqlite as engine::TaskQueue>::next_runnable(&db).await.unwrap(),
+            <Sqlite as engine::TaskQueue>::next_runnable(&db)
+                .await
+                .unwrap(),
             Some("run-1".into())
         );
     }
@@ -422,6 +426,9 @@ mod tests {
         assert_eq!(out, SignalOutcome::NotRunning);
         // No SignalReceived was appended (last event is still WorkflowStarted).
         let h = db.read_history("run-1").await.unwrap();
-        assert!(matches!(h.last().unwrap().event, Event::WorkflowStarted { .. }));
+        assert!(matches!(
+            h.last().unwrap().event,
+            Event::WorkflowStarted { .. }
+        ));
     }
 }

@@ -51,6 +51,10 @@ These apply to every chunk; chunk plans assume them.
 - **Naming (spec §10):** never stutter the crate name into a type
   (`workflow::Context`, not `WfContext`; marker traits `workflow::Definition` /
   `activity::Definition`).
+- **Verification gate (every chunk):** a chunk is not done until all three pass —
+  `cargo test` (all crates green), `cargo clippy --all-targets -- -D warnings`
+  (clean), and `cargo fmt --all -- --check` (no drift). Each chunk plan's final
+  task runs the full trio.
 
 ### Workspace dependency versions (`[workspace.dependencies]`)
 
@@ -150,8 +154,8 @@ pub struct Context { /* Rc<ContextInner>; minimal in 1a, replay state added in 1
 pub struct SpawnHandle<T> { /* Rc<RefCell<Option<T>>>; resolves to T when the branch completes */ }  // 2b
 // WorkflowState drives main + spawned branches to quiescence per turn (ordered scheduler, §4.4).  // 2b
 
-pub struct SignalChannel<T> { /* Arc<SignalRecv<T>> */ }                    // 3a
-pub struct SignalRecv<T> { /* blocking recv / poll */ }                     // 3a
+pub struct SignalChannel<T> { /* Rc<ContextInner> + name; idempotent by name */ }  // 3a
+pub struct SignalRecv<T> { /* Rc<ContextInner> + name; poll pops the per-name buffer */ }  // 3a
 
 // `?Send`: workflow futures hold Rc/RefCell (single-threaded loop), so they are
 // NOT Send. Associated types are `'static` (not Send — values never cross threads).

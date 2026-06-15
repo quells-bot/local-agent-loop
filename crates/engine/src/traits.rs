@@ -1,4 +1,6 @@
-use crate::{ActivityLease, CreateOutcome, ExecStatus, RunMeta, SignalOutcome, StoredEvent, TurnCommit};
+use crate::{
+    ActivityLease, CreateOutcome, ExecStatus, RunMeta, SignalOutcome, StoredEvent, TurnCommit,
+};
 use workflow::CommandResult;
 
 /// History store + atomic decision-turn commit (spec §15).
@@ -24,7 +26,7 @@ pub trait History: Send + Sync {
     /// runnable for this run (spec §5.1 — the exactly-once boundary).
     async fn commit_turn(&self, run_id: &str, commit: &TurnCommit) -> anyhow::Result<()>;
 
-      /// Append a `SignalReceived` event to the run identified by `workflow_id` and
+    /// Append a `SignalReceived` event to the run identified by `workflow_id` and
     /// mark it runnable, in ONE transaction (spec §6.1 — the durable-before-return
     /// boundary). The status check and the append are atomic: a signal is appended
     /// only if the run is still `running`. Returns a typed outcome rather than
