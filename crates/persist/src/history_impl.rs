@@ -1,6 +1,6 @@
 use rusqlite::{params, OptionalExtension};
 
-use engine::{CreateOutcome, ExecStatus, History, RunMeta, StoredEvent, TurnCommit};
+use engine::{CreateOutcome, ExecStatus, History, RunMeta, SignalOutcome, StoredEvent, TurnCommit};
 use workflow::Event;
 
 use crate::sqlite::{now_ms, Sqlite};
@@ -185,12 +185,60 @@ impl History for Sqlite {
             )
         }))
     }
+
+    async fn append_signal(
+        &self,
+        workflow_id: &str,
+        name: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<SignalOutcome> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        // Resolve the run + status under the same transaction as the append, so the
+        // status check and the write are atomic (spec §6.1).
+        let row: Option<(String, String)> = tx
+            .query_row(
+                "SELECT run_id, status FROM executions WHERE workflow_id = ?1",
+                params![workflow_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+
+        let Some((run_id, status)) = row else {
+            tx.commit()?;
+            return Ok(SignalOutcome::WorkflowNotFound);
+        };
+        if ExecStatus::from_str(&status) != Some(ExecStatus::Running) {
+            tx.commit()?;
+            return Ok(SignalOutcome::NotRunning);
+        }
+
+        // Append SignalReceived (inbound → seq NULL) and re-arm the runnable queue.
+        let event = Event::SignalReceived {
+            name: name.to_string(),
+            payload: payload.to_vec(),
+        };
+        let payload_bytes = serde_json::to_vec(&event)?;
+        let next_id = next_event_id(&tx, &run_id)?;
+        tx.execute(
+            "INSERT INTO history (run_id, event_id, seq, kind, payload, ts) \
+             VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+            params![run_id, next_id, event.kind(), payload_bytes, now_ms()],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO runnable (run_id, since) VALUES (?1, ?2)",
+            params![run_id, now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(SignalOutcome::Delivered)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::{ExecStatus, NewActivityTask};
+    use engine::{ExecStatus, NewActivityTask, SignalOutcome};
     use workflow::RetryPolicy;
 
     #[tokio::test]
@@ -307,5 +355,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(seq, None, "inbound events carry no seq (spec §6, §11)");
+    }
+
+    #[tokio::test]
+    async fn append_signal_delivers_to_running_and_marks_runnable() {
+        let db = Sqlite::open_in_memory().unwrap();
+        db.create_execution("run-1", "wf-A", "T", b"in")
+            .await
+            .unwrap();
+        // Drive the create's runnable flag away first (simulate the run going idle).
+        let idle = TurnCommit {
+            events: vec![],
+            new_tasks: vec![],
+            new_timers: vec![],
+            status: ExecStatus::Running,
+            result: None,
+        };
+        db.commit_turn("run-1", &idle).await.unwrap();
+        assert_eq!(
+            <Sqlite as engine::TaskQueue>::next_runnable(&db).await.unwrap(),
+            None
+        );
+
+        let out = db.append_signal("wf-A", "approve", b"true").await.unwrap();
+        assert_eq!(out, SignalOutcome::Delivered);
+
+        // The SignalReceived event is appended with NULL seq, and the run is runnable.
+        let h = db.read_history("run-1").await.unwrap();
+        match &h.last().unwrap().event {
+            Event::SignalReceived { name, payload } => {
+                assert_eq!(name, "approve");
+                assert_eq!(payload, b"true");
+            }
+            other => panic!("expected SignalReceived, got {other:?}"),
+        }
+        assert_eq!(
+            <Sqlite as engine::TaskQueue>::next_runnable(&db).await.unwrap(),
+            Some("run-1".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn append_signal_unknown_id_is_not_found() {
+        let db = Sqlite::open_in_memory().unwrap();
+        let out = db.append_signal("nope", "approve", b"true").await.unwrap();
+        assert_eq!(out, SignalOutcome::WorkflowNotFound);
+    }
+
+    #[tokio::test]
+    async fn append_signal_to_terminal_run_is_not_running() {
+        let db = Sqlite::open_in_memory().unwrap();
+        db.create_execution("run-1", "wf-A", "T", b"in")
+            .await
+            .unwrap();
+        // Mark the run completed.
+        let done = TurnCommit {
+            events: vec![],
+            new_tasks: vec![],
+            new_timers: vec![],
+            status: ExecStatus::Completed,
+            result: Some(b"\"done\"".to_vec()),
+        };
+        db.commit_turn("run-1", &done).await.unwrap();
+
+        let out = db.append_signal("wf-A", "approve", b"true").await.unwrap();
+        assert_eq!(out, SignalOutcome::NotRunning);
+        // No SignalReceived was appended (last event is still WorkflowStarted).
+        let h = db.read_history("run-1").await.unwrap();
+        assert!(matches!(h.last().unwrap().event, Event::WorkflowStarted { .. }));
     }
 }
