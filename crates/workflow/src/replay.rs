@@ -81,8 +81,8 @@ pub fn cold_replay<W: crate::Definition>(
         }
     }
     // Map an emitted command to (seq, RecordedCmd) for comparison. Returns None for
-    // commands that carry no seq and are divergence-exempt (none today; a later pass's
-    // RecordPatch will add a None arm here).
+    // commands that carry no seq and are divergence-exempt — `RecordPatch` (the
+    // change-version marker, like an inbound signal), handled by the `None` arm below.
     fn as_recorded(cmd: &Command) -> Option<(u64, RecordedCmd)> {
         match cmd {
             Command::ScheduleActivity {
