@@ -28,6 +28,18 @@ impl Sqlite {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
+
+    /// Test/diagnostic helper: force a leased task's TTL into the past so the next
+    /// `reclaim_expired_activities` reclaims it. Not used by the engine in
+    /// production.
+    pub fn expire_lease_for_test(&self, run_id: &str, seq: i64) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE activity_tasks SET lease_expires_at = 0 WHERE run_id = ?1 AND seq = ?2",
+            rusqlite::params![run_id, seq],
+        )?;
+        Ok(())
+    }
 }
 
 /// Idempotent schema evolution for DBs created before a column existed. SQLite has
