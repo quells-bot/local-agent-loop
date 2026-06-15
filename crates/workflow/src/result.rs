@@ -55,8 +55,7 @@ mod tests {
 
     #[test]
     fn child_completed_converts_to_ok_and_failed_to_err() {
-        let ok: Result<Vec<u8>, crate::Error> =
-            ChildResult::Completed(b"hi".to_vec()).into();
+        let ok: Result<Vec<u8>, crate::Error> = ChildResult::Completed(b"hi".to_vec()).into();
         assert_eq!(ok.unwrap(), b"hi");
 
         let err: Result<Vec<u8>, crate::Error> =
@@ -67,8 +66,7 @@ mod tests {
     #[test]
     fn child_result_round_trips_through_json() {
         let c = ChildResult::Completed(b"42".to_vec());
-        let back: ChildResult =
-            serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        let back: ChildResult = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(c, back);
     }
 }

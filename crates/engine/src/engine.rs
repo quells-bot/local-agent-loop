@@ -238,7 +238,8 @@ impl Engine {
             .iter()
             .filter_map(|e| match e {
                 workflow::Event::ActivityScheduled { seq, .. }
-                | workflow::Event::TimerStarted { seq, .. } => Some(*seq),
+                | workflow::Event::TimerStarted { seq, .. }
+                | workflow::Event::ChildScheduled { seq, .. } => Some(*seq),
                 _ => None,
             })
             .collect();

@@ -50,8 +50,7 @@ mod tests {
             workflow_type: "Ship".into(),
             input: b"{}".to_vec(),
         };
-        let back: Command =
-            serde_json::from_str(&serde_json::to_string(&child).unwrap()).unwrap();
+        let back: Command = serde_json::from_str(&serde_json::to_string(&child).unwrap()).unwrap();
         assert_eq!(child, back);
     }
 }
