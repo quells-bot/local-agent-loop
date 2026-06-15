@@ -78,6 +78,15 @@ pub enum CreateOutcome {
     AlreadyExists,
 }
 
+/// Result of an `append_signal` attempt (spec §6.1). The host maps this to the
+/// public `SignalError`; the trait stays free of the host-facing error type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalOutcome {
+    Delivered,
+    WorkflowNotFound,
+    NotRunning,
+}
+
 /// Metadata for one run, resolved by `run_id` (driver needs this to build
 /// `workflow::Info` and pick the replay closure).
 #[derive(Debug, Clone, PartialEq, Eq)]
