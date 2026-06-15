@@ -203,3 +203,34 @@ async fn cold_recovery_completes_parent_and_child() {
     let out: i64 = serde_json::from_slice(&result.unwrap()).unwrap();
     assert_eq!(out, 11);
 }
+
+#[tokio::test]
+async fn dead_lettered_child_fails_parent() {
+    // Build an engine that knows Parent but NOT Child, so the child run dead-letters
+    // on "unregistered workflow Child". (Cannot use `build`, which registers Child.)
+    let db = Sqlite::open_in_memory().unwrap();
+    let h: Arc<dyn engine::History> = Arc::new(db.clone());
+    let q: Arc<dyn engine::TaskQueue> = Arc::new(db.clone());
+    let mut engine = Engine::new(h, q);
+    engine.register_workflow::<Parent>();
+    // NOTE: Child is intentionally not registered.
+
+    engine
+        .start_workflow::<Parent>(5, StartOptions { id: "p-dead".into() })
+        .await
+        .unwrap();
+
+    pump(&engine).await.unwrap();
+
+    // The child dead-lettered (unregistered type) and, in the SAME transaction, notified
+    // its parent — so the parent's ChildFuture resolved to Failed and the parent failed
+    // too, instead of parking forever.
+    let (_, child_status, _) = db.find_execution("p-dead::child::0").await.unwrap().unwrap();
+    assert_eq!(child_status, ExecStatus::Failed, "child dead-letters to Failed");
+    let (_, parent_status, _) = db.find_execution("p-dead").await.unwrap().unwrap();
+    assert_eq!(
+        parent_status,
+        ExecStatus::Failed,
+        "parent must observe the child's failure, not hang Running"
+    );
+}
