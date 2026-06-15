@@ -341,7 +341,7 @@ impl Engine {
                         fire_at: now_ms() + *duration_ms as i64,
                     });
                 }
-  workflow::Command::StartChild {
+                workflow::Command::StartChild {
                     seq,
                     workflow_type,
                     input,
@@ -365,7 +365,7 @@ impl Engine {
             }
         }
 
- let (status, result) = match &outcome.completion {
+        let (status, result) = match &outcome.completion {
             Some(Ok(bytes)) => (ExecStatus::Completed, Some(bytes.clone())),
             Some(Err(err)) => (ExecStatus::Failed, Some(serde_json::to_vec(err)?)),
             None => (ExecStatus::Running, None),
@@ -429,7 +429,7 @@ impl Engine {
     ) -> anyhow::Result<bool> {
         let err = workflow::Error::new(message);
         let result = Some(serde_json::to_vec(&err)?);
-   let commit = TurnCommit {
+        let commit = TurnCommit {
             events: Vec::new(),
             new_tasks: Vec::new(),
             new_timers: Vec::new(),

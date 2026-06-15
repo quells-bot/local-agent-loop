@@ -211,7 +211,7 @@ mod tests {
         db.create_execution("run-1", "wf-A", "T", b"in")
             .await
             .unwrap();
-     let commit = TurnCommit {
+        let commit = TurnCommit {
             events: vec![Event::ActivityScheduled {
                 seq: 0,
                 activity_type: "Add".into(),
@@ -333,7 +333,7 @@ mod tests {
             .await
             .unwrap();
         let policy = RetryPolicy::exponential(5);
-       let commit = TurnCommit {
+        let commit = TurnCommit {
             events: vec![Event::ActivityScheduled {
                 seq: 0,
                 activity_type: "Add".into(),
@@ -368,7 +368,7 @@ mod tests {
             .await
             .unwrap();
         let future = now_ms() + 60_000; // due in a minute
-      let commit = TurnCommit {
+        let commit = TurnCommit {
             events: vec![Event::ActivityScheduled {
                 seq: 0,
                 activity_type: "Add".into(),
@@ -402,7 +402,7 @@ mod tests {
             .unwrap();
 
         // Commit a TimerStarted event + a timer row already due (fire_at = 0).
-       let commit = TurnCommit {
+        let commit = TurnCommit {
             events: vec![Event::TimerStarted {
                 seq: 0,
                 duration_ms: 500,
@@ -441,7 +441,7 @@ mod tests {
         db.create_execution("run-1", "wf-A", "T", b"in")
             .await
             .unwrap();
-  let commit = TurnCommit {
+        let commit = TurnCommit {
             events: vec![Event::TimerStarted {
                 seq: 0,
                 duration_ms: 60_000,

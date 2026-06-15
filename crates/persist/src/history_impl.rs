@@ -96,25 +96,30 @@ impl History for Sqlite {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT workflow_id, workflow_type, status FROM executions WHERE run_id = ?1",
+                "SELECT workflow_id, workflow_type, status, parent_run_id, parent_seq \
+                 FROM executions WHERE run_id = ?1",
                 params![run_id],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
                     ))
                 },
             )
             .optional()?;
-       Ok(row.map(|(workflow_id, workflow_type, status)| RunMeta {
-            run_id: run_id.to_string(),
-            workflow_id,
-            workflow_type,
-            status: ExecStatus::from_str(&status).unwrap_or(ExecStatus::Running),
-            parent_run_id: None,
-            parent_seq: None,
-        }))
+        Ok(row.map(
+            |(workflow_id, workflow_type, status, parent_run_id, parent_seq)| RunMeta {
+                run_id: run_id.to_string(),
+                workflow_id,
+                workflow_type,
+                status: ExecStatus::from_str(&status).unwrap_or(ExecStatus::Running),
+                parent_run_id,
+                parent_seq,
+            },
+        ))
     }
 
     async fn commit_turn(&self, run_id: &str, commit: &TurnCommit) -> anyhow::Result<()> {
@@ -286,7 +291,7 @@ mod tests {
             .await
             .unwrap();
 
-   let commit = TurnCommit {
+        let commit = TurnCommit {
             events: vec![Event::ActivityScheduled {
                 seq: 0,
                 activity_type: "Add".into(),
@@ -328,7 +333,7 @@ mod tests {
             .await
             .unwrap();
 
-      let commit = TurnCommit {
+        let commit = TurnCommit {
             events: vec![Event::SignalReceived {
                 name: "approve".into(),
                 payload: b"true".to_vec(),
@@ -423,7 +428,7 @@ mod tests {
             .await
             .unwrap();
         // Mark the run completed.
-    let done = TurnCommit {
+        let done = TurnCommit {
             events: vec![],
             new_tasks: vec![],
             new_timers: vec![],
