@@ -34,6 +34,24 @@ async fn submit(
         .map_err(|e| e.to_string())
 }
 
+/// Map a terminal `RunCompleted` into the event payload pushed to the frontend
+/// (spec §7.3). Extracted as a free function so the result-bytes → payload
+/// mapping is unit-testable without a running Tauri app.
+fn completion_payload(ev: RunCompleted) -> CompletionPayload {
+    CompletionPayload {
+        workflow_id: ev.workflow_id,
+        run_id: ev.run_id,
+        status: if matches!(ev.status, ExecStatus::Completed) {
+            "completed"
+        } else {
+            "failed"
+        },
+        result: ev
+            .result
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()),
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -54,19 +72,7 @@ pub fn run() {
             // Push terminal completions to the frontend (spec §7.3).
             let app_handle = app.handle().clone();
             engine.on_run_completed(move |ev: RunCompleted| {
-                let payload = CompletionPayload {
-                    workflow_id: ev.workflow_id,
-                    run_id: ev.run_id,
-                    status: if matches!(ev.status, ExecStatus::Completed) {
-                        "completed"
-                    } else {
-                        "failed"
-                    },
-                    result: ev
-                        .result
-                        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()),
-                };
-                let _ = app_handle.emit("run_completed", payload);
+                let _ = app_handle.emit("run_completed", completion_payload(ev));
             });
 
             // `Engine::start` uses `tokio::spawn`, so a tokio runtime must be the
@@ -87,4 +93,46 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![submit])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ev(status: ExecStatus, result: Option<serde_json::Value>) -> RunCompleted {
+        RunCompleted {
+            run_id: "run-1".into(),
+            workflow_id: "wf-1".into(),
+            status,
+            result: result.map(|v| serde_json::to_vec(&v).unwrap()),
+        }
+    }
+
+    #[test]
+    fn completed_run_maps_to_completed_status_and_total() {
+        let p = completion_payload(ev(ExecStatus::Completed, Some(json!({ "total": 6 }))));
+        assert_eq!(p.workflow_id, "wf-1");
+        assert_eq!(p.run_id, "run-1");
+        assert_eq!(p.status, "completed");
+        assert_eq!(p.result, Some(json!({ "total": 6 })));
+    }
+
+    #[test]
+    fn failed_run_maps_to_failed_status_and_message() {
+        let p = completion_payload(ev(
+            ExecStatus::Failed,
+            Some(json!({ "message": "could not parse 'two' as an integer" })),
+        ));
+        assert_eq!(p.status, "failed");
+        let msg = p.result.unwrap();
+        assert!(msg["message"].as_str().unwrap().contains("two"));
+    }
+
+    #[test]
+    fn missing_result_bytes_map_to_none() {
+        let p = completion_payload(ev(ExecStatus::Failed, None));
+        assert_eq!(p.status, "failed");
+        assert!(p.result.is_none());
+    }
 }
