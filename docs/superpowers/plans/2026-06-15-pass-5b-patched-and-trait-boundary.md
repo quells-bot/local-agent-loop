@@ -476,6 +476,17 @@ there is a recorded completion still ahead when `patched()` is first reached:
         }
     }
 
+    // CORRECTION (made during execution): the old-branch test below was authored with
+    // history `[WS, AS0, AC0]`, but in that history `patched()` is reached AT THE
+    // FRONTIER (seq 0's completion is the last event, nothing ahead) — which is
+    // indistinguishable from a fresh new execution and correctly takes the NEW branch.
+    // The genuine "replaying older history" case needs a recorded event AHEAD of the
+    // patched point. As implemented, this test uses a two-activity `ActPatchAct` fixture
+    // (`activity seq0; if patched {a+100} else {activity seq1; a+b}`) with history
+    // `[WS, AS0, AC0, AS1, AC1]` → out 8, no marker; and a separate
+    // `patched_at_frontier_after_activity_records_marker_and_takes_new_branch` test
+    // (using `ActThenBranch` over `[WS, AS0, AC0]`) → out 102 + marker locks in the
+    // frontier=new-branch behaviour. The frontier formula stays `cursor < applied.len()`.
     #[test]
     fn patched_takes_old_branch_when_replaying_older_history() {
         // History from code WITHOUT the patch: it scheduled seq 0 and completed it.
