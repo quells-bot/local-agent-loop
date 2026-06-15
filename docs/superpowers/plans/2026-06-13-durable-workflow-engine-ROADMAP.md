@@ -178,6 +178,7 @@ pub struct NewTimer { pub seq: i64, pub fire_at: i64 }    // 2a (done)
     async fn read_history(&self, run_id: &str) -> Result<Vec<StoredEvent>>;
     async fn load_run(&self, run_id: &str) -> Result<Option<RunMeta>>;
     async fn commit_turn(&self, run_id: &str, commit: &TurnCommit) -> Result<()>;
+    async fn append_signal(&self, workflow_id: &str, name: &str, payload: &[u8]) -> anyhow::Result<SignalOutcome>;  // 3b (done)
     async fn find_execution(&self, workflow_id: &str)
         -> Result<Option<(String, ExecStatus, Option<Vec<u8>>)>>;
 }
@@ -188,8 +189,20 @@ pub struct NewTimer { pub seq: i64, pub fire_at: i64 }    // 2a (done)
     async fn reschedule_activity(&self, lease: &ActivityLease, next_run_at: i64) -> Result<()>;
     async fn fire_due_timer(&self) -> Result<bool>;   // 2a (done)
     async fn reclaim_expired_activities(&self) -> Result<u64>;   // 2c (done)
+    async fn expire_lease_for_test(&self, workflow_id: &str, activity_id: &str) -> Result<()>;   // 2c (done)
 }
-pub enum SignalError { WorkflowNotFound, NotRunning }   // Pass 3
+
+pub struct Engine { /* replays + driver; see lib.rs for re-exports */ }
+pub struct Handle { /* Engine + workflow_id scope */ }
+impl Engine { pub async fn signal_workflow(&self, workflow_id: &str, name: &str, payload: &[u8]) -> Result<(), SignalError>; }
+impl Handle { pub async fn signal(&self, name: &str, payload: &[u8]) -> Result<(), SignalError>; }  // 3b (done)
+pub enum SignalError {
+        WorkflowNotFound,   // no execution with that workflow_id
+        NotRunning,         // execution is completed/failed (matches Temporal)
+        Internal(anyhow::Error),  // unexpected backend failure (#[from]; escape hatch for IPC)
+    }
+
+pub enum SignalOutcome { Delivered, WorkflowNotFound, NotRunning }  // internal; host maps to SignalError
 ```
 
 (`anyhow::Result` elided as `Result` above. Supporting types — `ExecStatus`,
@@ -214,7 +227,7 @@ sweeps to requeue tasks whose lease has expired.
 | 2b | Combinators + spawn scheduler | §4.2, §4.4 | `2026-06-14-pass-2b-combinators-and-spawn.md` | done |
 | 2c | Robustness hardening (lease-expiry + dead-letter) | §5.1, §5.2, §14 | `2026-06-14-pass-2c-hardening.md` | done |
 | 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | `2026-06-14-pass-3a-inbound-events-and-signal-channel.md` | done |
-| 3b | `signal_workflow` + signal-or-timeout e2e | §6.1, §7.2 | _(JIT)_ | not yet authored |
+| 3b | `signal_workflow` + signal-or-timeout e2e | §6.1, §7.2 | `2026-06-14-pass-3b-signal-workflow-and-e2e.md` | done |
 | 4a | Child workflows | §5.4, §9(info.parent) | _(JIT)_ | not yet authored |
 | 5a | Cache vs cold-replay equivalence + hardening | §12, §14 | _(JIT)_ | not yet authored |
 | 5b | `ctx.patched` + trait cleanup + macros lint | §4.2, §14, §15 | _(JIT)_ | not yet authored |
