@@ -116,6 +116,57 @@ impl Future for TimerFuture {
     }
 }
 
+/// Awaitable handle for one child workflow (the `ExecuteChildWorkflow` analog, spec
+/// §5.4, §9). Resolves to the child's typed Output or a `workflow::Error`. `seq`
+/// identifies it in the parent's history; the shared `scheduled` set means it emits
+/// `StartChild` exactly once across re-polls (Invariant 4).
+pub struct ChildFuture<W: crate::Definition> {
+    inner: Rc<ContextInner>,
+    seq: u64,
+    input: Vec<u8>,
+    // `fn() -> W` keeps the future `Unpin` and `Send`-agnostic regardless of `W`;
+    // `W` is only a type tag here, never stored.
+    _marker: PhantomData<fn() -> W>,
+}
+
+impl<W: crate::Definition> ChildFuture<W> {
+    pub(crate) fn new(inner: Rc<ContextInner>, seq: u64, input: Vec<u8>) -> Self {
+        Self {
+            inner,
+            seq,
+            input,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<W: crate::Definition> Future for ChildFuture<W> {
+    type Output = Result<W::Output, crate::Error>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        let me = self.get_mut();
+
+        // 1. Replay path: child outcome already recorded -> resolve immediately.
+        let recorded = me.inner.child_results.borrow().get(&me.seq).cloned();
+        if let Some(recorded) = recorded {
+            return Poll::Ready(recorded.and_then(|b| {
+                serde_json::from_slice::<W::Output>(&b)
+                    .map_err(|e| crate::Error::new(format!("child output deserialize: {e}")))
+            }));
+        }
+
+        // 2. First arrival: emit StartChild exactly once, then park (Invariant 4).
+        if me.inner.scheduled.borrow_mut().insert(me.seq) {
+            me.inner.commands.borrow_mut().push(Command::StartChild {
+                seq: me.seq,
+                workflow_type: W::TYPE.to_string(),
+                input: me.input.clone(),
+            });
+        }
+        Poll::Pending
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +249,75 @@ mod tests {
         ctx.apply_result(0, CommandResult::ActivityFailed(Error::fatal("nope")));
         match poll(&mut f) {
             Poll::Ready(Err(e)) => assert_eq!(e.message, "nope"),
+            other => panic!("expected Ready(Err), got {other:?}"),
+        }
+    }
+
+    // === ChildFuture tests ===
+
+    struct Echo;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for Echo {
+        type Input = i64;
+        type Output = i64;
+        const TYPE: &'static str = "Echo";
+        async fn run(_c: Context, i: i64) -> Result<i64, crate::Error> {
+            Ok(i)
+        }
+    }
+
+    fn poll_child<W: crate::Definition>(
+        f: &mut crate::future::ChildFuture<W>,
+    ) -> Poll<Result<W::Output, crate::Error>> {
+        let waker = futures::task::noop_waker();
+        let mut tcx = TaskContext::from_waker(&waker);
+        Pin::new(f).poll(&mut tcx)
+    }
+
+    #[test]
+    fn child_first_poll_emits_one_start_child_then_pends() {
+        let ctx = ctx();
+        let mut f = ctx.child_workflow::<Echo>(7i64);
+        assert!(poll_child(&mut f).is_pending());
+        let cmds = ctx.drain_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(&cmds[0],
+            Command::StartChild { seq: 0, workflow_type, .. } if workflow_type == "Echo"));
+    }
+
+    #[test]
+    fn child_re_poll_does_not_duplicate_the_command() {
+        let ctx = ctx();
+        let mut f = ctx.child_workflow::<Echo>(7i64);
+        assert!(poll_child(&mut f).is_pending());
+        let _ = ctx.drain_commands();
+        assert!(poll_child(&mut f).is_pending());
+        assert!(
+            ctx.drain_commands().is_empty(),
+            "in-flight child seq must not re-emit"
+        );
+    }
+
+    #[test]
+    fn child_resolves_to_typed_output_when_result_applied() {
+        let ctx = ctx();
+        let mut f = ctx.child_workflow::<Echo>(7i64);
+        assert!(poll_child(&mut f).is_pending());
+        ctx.apply_child_result(0, Ok(serde_json::to_vec(&42i64).unwrap()));
+        match poll_child(&mut f) {
+            Poll::Ready(Ok(v)) => assert_eq!(v, 42),
+            other => panic!("expected Ready(Ok(42)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn child_surfaces_failure() {
+        let ctx = ctx();
+        let mut f = ctx.child_workflow::<Echo>(7i64);
+        assert!(poll_child(&mut f).is_pending());
+        ctx.apply_child_result(0, Err(crate::Error::new("child boom")));
+        match poll_child(&mut f) {
+            Poll::Ready(Err(e)) => assert_eq!(e.message, "child boom"),
             other => panic!("expected Ready(Err), got {other:?}"),
         }
     }

@@ -98,6 +98,10 @@ impl WorkflowState {
     pub fn apply_signal(&self, name: String, payload: Vec<u8>) {
         self.ctx.apply_signal(name, payload);
     }
+
+    pub fn apply_child_result(&self, seq: u64, result: Result<Vec<u8>, crate::Error>) {
+        self.ctx.apply_child_result(seq, result);
+    }
 }
 
 #[cfg(test)]

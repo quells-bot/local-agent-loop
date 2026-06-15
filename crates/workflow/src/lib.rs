@@ -42,7 +42,7 @@ mod context;
 pub use context::Context;
 
 mod future;
-pub use future::{ActivityFuture, TimerFuture};
+pub use future::{ActivityFuture, ChildFuture, TimerFuture};
 
 mod spawn;
 pub use spawn::SpawnHandle;
