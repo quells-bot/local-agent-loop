@@ -6,8 +6,11 @@
 //! so that with the one-event-per-turn rule (spec §4.1) they replay identically:
 //!
 //! - **Allowed:** `futures::join!`, `futures::try_join!`, ordered `join_all`, and
-//!   `futures::select_biased!` (the `workflow.Selector` analog — deterministic by
-//!   registration order). Spawn detached branches with [`Context::spawn`].
+//!   `futures::select_biased!` (the `workflow.Selector` analog). Its winner is a pure
+//!   function of recorded history: under one-event-per-turn (spec §4.1) only one
+//!   branch can become ready per poll, so the first completion in `history.event_id`
+//!   order wins; registration order is only the tie-break that one-event-per-turn
+//!   never needs. Spawn detached branches with [`Context::spawn`].
 //! - **Banned (non-deterministic):** `futures::select!` (randomizes branch order)
 //!   and bare `FuturesUnordered` (reorders by wakeup/wall-clock order). Using either
 //!   breaks replay.

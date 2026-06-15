@@ -79,8 +79,8 @@ async fn timer_cold_recovery_completes_identically() {
             .await
             .unwrap();
         assert!(engine.process_one_runnable().await.unwrap()); // emits StartTimer seq 0
-        // engine dropped here; only the shared `db` survives. The timer row and the
-        // TimerStarted event are durable; TimerFired has not been written yet.
+                                                               // engine dropped here; only the shared `db` survives. The timer row and the
+                                                               // TimerStarted event are durable; TimerFired has not been written yet.
     }
 
     // Phase 2: a fresh engine fires the timer and completes by cold replay.

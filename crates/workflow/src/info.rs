@@ -14,7 +14,10 @@ mod tests {
     #[test]
     fn parent_defaults_to_none_for_root() {
         let i = Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             parent: None,
             workflow_type: "OrderWorkflow".into(),
         };

@@ -26,10 +26,7 @@ impl workflow::Definition for Pair {
     type Output = i64;
     const TYPE: &'static str = "Pair";
     async fn run(ctx: workflow::Context, _i: ()) -> Result<i64, workflow::Error> {
-        let (a, b) = futures::join!(
-            ctx.activity::<Add>((1, 2)),
-            ctx.activity::<Add>((10, 20)),
-        );
+        let (a, b) = futures::join!(ctx.activity::<Add>((1, 2)), ctx.activity::<Add>((10, 20)),);
         Ok(a? + b?)
     }
 }
@@ -96,7 +93,12 @@ async fn join_runs_concurrent_branches() {
     let db = Sqlite::open_in_memory().unwrap();
     let engine = build::<Pair>(&db);
     let handle = engine
-        .start_workflow::<Pair>((), StartOptions { id: "pair-1".into() })
+        .start_workflow::<Pair>(
+            (),
+            StartOptions {
+                id: "pair-1".into(),
+            },
+        )
         .await
         .unwrap();
     pump(&engine).await.unwrap();
@@ -112,7 +114,12 @@ async fn join_branches_replay_across_cold_recovery() {
     {
         let engine = build::<Pair>(&db);
         engine
-            .start_workflow::<Pair>((), StartOptions { id: "pair-2".into() })
+            .start_workflow::<Pair>(
+                (),
+                StartOptions {
+                    id: "pair-2".into(),
+                },
+            )
             .await
             .unwrap();
         assert!(engine.process_one_runnable().await.unwrap()); // emits two ScheduleActivity
@@ -132,12 +139,20 @@ async fn select_biased_activity_beats_timer() {
     let db = Sqlite::open_in_memory().unwrap();
     let engine = build::<Pick>(&db);
     let handle = engine
-        .start_workflow::<Pick>((), StartOptions { id: "pick-1".into() })
+        .start_workflow::<Pick>(
+            (),
+            StartOptions {
+                id: "pick-1".into(),
+            },
+        )
         .await
         .unwrap();
     pump(&engine).await.unwrap();
     let out: i64 = handle.result().await.unwrap();
-    assert_eq!(out, 15, "the activity branch wins; the day-long timer never fires");
+    assert_eq!(
+        out, 15,
+        "the activity branch wins; the day-long timer never fires"
+    );
 }
 
 #[tokio::test]
@@ -148,7 +163,12 @@ async fn select_biased_replays_across_cold_recovery() {
     {
         let engine = build::<Pick>(&db);
         engine
-            .start_workflow::<Pick>((), StartOptions { id: "pick-2".into() })
+            .start_workflow::<Pick>(
+                (),
+                StartOptions {
+                    id: "pick-2".into(),
+                },
+            )
             .await
             .unwrap();
         assert!(engine.process_one_runnable().await.unwrap()); // ScheduleActivity seq0 + StartTimer seq1
@@ -169,7 +189,12 @@ async fn spawn_detached_branch_completes() {
     let db = Sqlite::open_in_memory().unwrap();
     let engine = build::<Detached>(&db);
     let handle = engine
-        .start_workflow::<Detached>((), StartOptions { id: "spawn-1".into() })
+        .start_workflow::<Detached>(
+            (),
+            StartOptions {
+                id: "spawn-1".into(),
+            },
+        )
         .await
         .unwrap();
     pump(&engine).await.unwrap();
@@ -185,7 +210,12 @@ async fn spawn_replays_across_cold_recovery() {
     {
         let engine = build::<Detached>(&db);
         engine
-            .start_workflow::<Detached>((), StartOptions { id: "spawn-2".into() })
+            .start_workflow::<Detached>(
+                (),
+                StartOptions {
+                    id: "spawn-2".into(),
+                },
+            )
             .await
             .unwrap();
         assert!(engine.process_one_runnable().await.unwrap()); // spawned branch emits ScheduleActivity seq0

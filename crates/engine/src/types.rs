@@ -54,11 +54,11 @@ pub struct NewTimer {
 /// Everything a single decision turn commits atomically (spec §5.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnCommit {
-    pub events: Vec<Event>,            // new history events emitted this turn
+    pub events: Vec<Event>, // new history events emitted this turn
     pub new_tasks: Vec<NewActivityTask>,
-    pub new_timers: Vec<NewTimer>,     // timers to enqueue this turn
+    pub new_timers: Vec<NewTimer>, // timers to enqueue this turn
     pub status: ExecStatus,
-    pub result: Option<Vec<u8>>,       // Some iff status != Running
+    pub result: Option<Vec<u8>>, // Some iff status != Running
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +68,7 @@ pub struct ActivityLease {
     pub seq: i64,
     pub activity_type: String,
     pub input: Vec<u8>,
-    pub attempt: u32, // 1-based; this is the current attempt number
+    pub attempt: u32,       // 1-based; this is the current attempt number
     pub retry: RetryPolicy, // read from the ActivityScheduled event by the queue
 }
 

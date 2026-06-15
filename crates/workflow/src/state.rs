@@ -24,7 +24,11 @@ impl WorkflowState {
             let out = W::run(run_ctx, input).await?;
             serde_json::to_vec(&out).map_err(|e| crate::Error::new(e.to_string()))
         });
-        Self { ctx, main, spawned: Vec::new() }
+        Self {
+            ctx,
+            main,
+            spawned: Vec::new(),
+        }
     }
 
     pub fn context(&self) -> &Context {
@@ -125,7 +129,10 @@ mod tests {
 
     fn info() -> Info {
         Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             parent: None,
             workflow_type: "Sum".into(),
         }
@@ -141,13 +148,19 @@ mod tests {
         assert!(matches!(&c0[0], Command::ScheduleActivity { seq: 0, .. }));
 
         // Feed result of seq 0 (=3), one event this turn.
-        s.apply_result(0, CommandResult::ActivityCompleted(serde_json::to_vec(&3i64).unwrap()));
+        s.apply_result(
+            0,
+            CommandResult::ActivityCompleted(serde_json::to_vec(&3i64).unwrap()),
+        );
         assert!(s.poll_turn().is_pending());
         let c1 = s.drain_commands();
         assert!(matches!(&c1[0], Command::ScheduleActivity { seq: 1, .. }));
 
         // Feed result of seq 1 (=13).
-        s.apply_result(1, CommandResult::ActivityCompleted(serde_json::to_vec(&13i64).unwrap()));
+        s.apply_result(
+            1,
+            CommandResult::ActivityCompleted(serde_json::to_vec(&13i64).unwrap()),
+        );
         match s.poll_turn() {
             Poll::Ready(Ok(bytes)) => {
                 let out: i64 = serde_json::from_slice(&bytes).unwrap();

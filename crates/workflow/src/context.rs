@@ -15,7 +15,7 @@ pub(crate) struct ContextInner {
     pub(crate) results: RefCell<HashMap<u64, CommandResult>>, // seq -> recorded outcome
     pub(crate) scheduled: RefCell<HashSet<u64>>,              // seqs emitted this life
     pub(crate) commands: RefCell<Vec<Command>>,               // emitted this turn
-    pub(crate) fired: RefCell<HashSet<u64>>,                   // timer seqs fired (no payload)
+    pub(crate) fired: RefCell<HashSet<u64>>,                  // timer seqs fired (no payload)
     // Futures spawned this turn, awaiting absorption by WorkflowState (spec §4.4).
     pub(crate) new_spawns: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
 }
@@ -120,7 +120,10 @@ mod tests {
 
     fn info() -> Info {
         Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             parent: None,
             workflow_type: "T".into(),
         }

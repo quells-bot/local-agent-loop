@@ -32,7 +32,10 @@ mod tests {
         let back: Command = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(c, back);
 
-        let t = Command::StartTimer { seq: 2, duration_ms: 500 };
+        let t = Command::StartTimer {
+            seq: 2,
+            duration_ms: 500,
+        };
         let back: Command = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         assert_eq!(t, back);
     }

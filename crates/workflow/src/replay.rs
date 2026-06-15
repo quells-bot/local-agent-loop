@@ -39,8 +39,10 @@ pub fn cold_replay<W: crate::Definition>(
             })
         }
     };
-    let input: W::Input = serde_json::from_slice(&input_bytes)
-        .map_err(|e| Nondeterminism { seq: 0, detail: format!("input deserialize: {e}") })?;
+    let input: W::Input = serde_json::from_slice(&input_bytes).map_err(|e| Nondeterminism {
+        seq: 0,
+        detail: format!("input deserialize: {e}"),
+    })?;
 
     // 2. Index recorded schedules (for divergence checks) and the ordered stream of
     //    things to apply one-per-turn (activity outcomes AND timer fires), in
@@ -55,14 +57,25 @@ pub fn cold_replay<W: crate::Definition>(
     let mut applied: Vec<Applied> = Vec::new();
     for ev in history {
         match ev {
-            Event::ActivityScheduled { seq, activity_type, input, .. } => {
+            Event::ActivityScheduled {
+                seq,
+                activity_type,
+                input,
+                ..
+            } => {
                 recorded_sched.insert(*seq, (activity_type.clone(), input.clone()));
             }
             Event::ActivityCompleted { seq, output } => {
-                applied.push(Applied::Result(*seq, CommandResult::ActivityCompleted(output.clone())));
+                applied.push(Applied::Result(
+                    *seq,
+                    CommandResult::ActivityCompleted(output.clone()),
+                ));
             }
             Event::ActivityFailed { seq, error } => {
-                applied.push(Applied::Result(*seq, CommandResult::ActivityFailed(error.clone())));
+                applied.push(Applied::Result(
+                    *seq,
+                    CommandResult::ActivityFailed(error.clone()),
+                ));
             }
             Event::TimerStarted { seq, duration_ms } => {
                 recorded_timer.insert(*seq, *duration_ms);
@@ -82,7 +95,12 @@ pub fn cold_replay<W: crate::Definition>(
         let poll = state.poll_turn();
         for cmd in state.drain_commands() {
             match &cmd {
-                Command::ScheduleActivity { seq, activity_type, input, .. } => {
+                Command::ScheduleActivity {
+                    seq,
+                    activity_type,
+                    input,
+                    ..
+                } => {
                     if let Some((rty, rin)) = recorded_sched.get(seq) {
                         if rty != activity_type || rin != input {
                             return Err(Nondeterminism {
@@ -111,7 +129,10 @@ pub fn cold_replay<W: crate::Definition>(
         }
         match poll {
             Poll::Ready(result) => {
-                return Ok(ReplayOutcome { commands, completion: Some(result) });
+                return Ok(ReplayOutcome {
+                    commands,
+                    completion: Some(result),
+                });
             }
             Poll::Pending => {
                 if cursor < applied.len() {
@@ -121,7 +142,10 @@ pub fn cold_replay<W: crate::Definition>(
                     }
                     cursor += 1;
                 } else {
-                    return Ok(ReplayOutcome { commands, completion: None });
+                    return Ok(ReplayOutcome {
+                        commands,
+                        completion: None,
+                    });
                 }
             }
         }
@@ -159,7 +183,10 @@ mod tests {
 
     fn info() -> Info {
         Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             parent: None,
             workflow_type: "Sum".into(),
         }
@@ -171,21 +198,29 @@ mod tests {
 
     fn full_history() -> Vec<Event> {
         vec![
-            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
             Event::ActivityScheduled {
                 seq: 0,
                 activity_type: "Add".into(),
                 input: add_input(1, 2),
                 retry: RetryPolicy::none(),
             },
-            Event::ActivityCompleted { seq: 0, output: serde_json::to_vec(&3i64).unwrap() },
+            Event::ActivityCompleted {
+                seq: 0,
+                output: serde_json::to_vec(&3i64).unwrap(),
+            },
             Event::ActivityScheduled {
                 seq: 1,
                 activity_type: "Add".into(),
                 input: add_input(3, 10),
                 retry: RetryPolicy::none(),
             },
-            Event::ActivityCompleted { seq: 1, output: serde_json::to_vec(&13i64).unwrap() },
+            Event::ActivityCompleted {
+                seq: 1,
+                output: serde_json::to_vec(&13i64).unwrap(),
+            },
         ]
     }
 
@@ -196,8 +231,14 @@ mod tests {
         let out: i64 = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(out, 13);
         assert_eq!(outcome.commands.len(), 2);
-        assert!(matches!(&outcome.commands[0], Command::ScheduleActivity { seq: 0, .. }));
-        assert!(matches!(&outcome.commands[1], Command::ScheduleActivity { seq: 1, .. }));
+        assert!(matches!(
+            &outcome.commands[0],
+            Command::ScheduleActivity { seq: 0, .. }
+        ));
+        assert!(matches!(
+            &outcome.commands[1],
+            Command::ScheduleActivity { seq: 1, .. }
+        ));
     }
 
     #[test]
@@ -239,14 +280,19 @@ mod tests {
         // Err. This is NOT nondeterminism — cold_replay returns Ok with a
         // completion of Some(Err(_)).
         let h = vec![
-            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
             Event::ActivityScheduled {
                 seq: 0,
                 activity_type: "Add".into(),
                 input: add_input(1, 2),
                 retry: RetryPolicy::none(),
             },
-            Event::ActivityFailed { seq: 0, error: activity::Error::fatal("boom") },
+            Event::ActivityFailed {
+                seq: 0,
+                error: activity::Error::fatal("boom"),
+            },
         ];
         let outcome = cold_replay::<Sum>(info(), &h).unwrap();
         match outcome.completion {
@@ -272,7 +318,10 @@ mod tests {
 
     fn nap_info() -> Info {
         Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             parent: None,
             workflow_type: "Nap".into(),
         }
@@ -281,8 +330,13 @@ mod tests {
     #[test]
     fn replays_timer_then_activity() {
         let h = vec![
-            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
-            Event::TimerStarted { seq: 0, duration_ms: 500 },
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::TimerStarted {
+                seq: 0,
+                duration_ms: 500,
+            },
             Event::TimerFired { seq: 0 },
             Event::ActivityScheduled {
                 seq: 1,
@@ -290,14 +344,26 @@ mod tests {
                 input: add_input(1, 2),
                 retry: RetryPolicy::none(),
             },
-            Event::ActivityCompleted { seq: 1, output: serde_json::to_vec(&3i64).unwrap() },
+            Event::ActivityCompleted {
+                seq: 1,
+                output: serde_json::to_vec(&3i64).unwrap(),
+            },
         ];
         let outcome = cold_replay::<Nap>(nap_info(), &h).unwrap();
         let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
         assert_eq!(out, 3);
         // First command is the timer (seq 0), then the activity (seq 1).
-        assert!(matches!(&outcome.commands[0], Command::StartTimer { seq: 0, duration_ms: 500 }));
-        assert!(matches!(&outcome.commands[1], Command::ScheduleActivity { seq: 1, .. }));
+        assert!(matches!(
+            &outcome.commands[0],
+            Command::StartTimer {
+                seq: 0,
+                duration_ms: 500
+            }
+        ));
+        assert!(matches!(
+            &outcome.commands[1],
+            Command::ScheduleActivity { seq: 1, .. }
+        ));
     }
 
     #[test]
@@ -305,8 +371,13 @@ mod tests {
         // History recorded a 500ms timer at seq 0; Nap emits 500ms, so mutate the
         // record to 999ms and expect a nondeterminism error at seq 0.
         let h = vec![
-            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
-            Event::TimerStarted { seq: 0, duration_ms: 999 },
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::TimerStarted {
+                seq: 0,
+                duration_ms: 999,
+            },
             Event::TimerFired { seq: 0 },
         ];
         let err = cold_replay::<Nap>(nap_info(), &h).unwrap_err();
@@ -334,12 +405,17 @@ mod tests {
     #[test]
     fn replays_spawned_branch() {
         let info = Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             parent: None,
             workflow_type: "Detached".into(),
         };
         let h = vec![
-            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
             // The spawned branch's activity is the first (and only) seq allocated.
             Event::ActivityScheduled {
                 seq: 0,
@@ -347,13 +423,19 @@ mod tests {
                 input: add_input(3, 4),
                 retry: RetryPolicy::none(),
             },
-            Event::ActivityCompleted { seq: 0, output: serde_json::to_vec(&7i64).unwrap() },
+            Event::ActivityCompleted {
+                seq: 0,
+                output: serde_json::to_vec(&7i64).unwrap(),
+            },
         ];
         let outcome = cold_replay::<Detached>(info, &h).unwrap();
         let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
         assert_eq!(out, 7);
         assert_eq!(outcome.commands.len(), 1);
-        assert!(matches!(&outcome.commands[0], Command::ScheduleActivity { seq: 0, .. }));
+        assert!(matches!(
+            &outcome.commands[0],
+            Command::ScheduleActivity { seq: 0, .. }
+        ));
     }
 
     // Fire-and-forget: a spawned branch is never awaited; `main` does its own
@@ -377,21 +459,49 @@ mod tests {
     #[test]
     fn fire_and_forget_spawn_does_not_block_completion() {
         let info = Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             parent: None,
             workflow_type: "FireAndForget".into(),
         };
         let h = vec![
-            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
-            Event::ActivityScheduled { seq: 0, activity_type: "Add".into(), input: add_input(10, 20), retry: RetryPolicy::none() },
-            Event::ActivityScheduled { seq: 1, activity_type: "Add".into(), input: add_input(1, 1), retry: RetryPolicy::none() },
-            Event::ActivityCompleted { seq: 0, output: serde_json::to_vec(&30i64).unwrap() },
-            Event::ActivityCompleted { seq: 1, output: serde_json::to_vec(&2i64).unwrap() },
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::ActivityScheduled {
+                seq: 0,
+                activity_type: "Add".into(),
+                input: add_input(10, 20),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityScheduled {
+                seq: 1,
+                activity_type: "Add".into(),
+                input: add_input(1, 1),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityCompleted {
+                seq: 0,
+                output: serde_json::to_vec(&30i64).unwrap(),
+            },
+            Event::ActivityCompleted {
+                seq: 1,
+                output: serde_json::to_vec(&2i64).unwrap(),
+            },
         ];
         let outcome = cold_replay::<FireAndForget>(info, &h).unwrap();
         let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
-        assert_eq!(out, 30, "main returns its own activity result regardless of the detached branch");
-        assert_eq!(outcome.commands.len(), 2, "both the main and the detached activity are scheduled");
+        assert_eq!(
+            out, 30,
+            "main returns its own activity result regardless of the detached branch"
+        );
+        assert_eq!(
+            outcome.commands.len(),
+            2,
+            "both the main and the detached activity are scheduled"
+        );
     }
 
     // Two concurrent spawns whose activities complete OUT OF ORDER (branch B's
@@ -418,21 +528,45 @@ mod tests {
     #[test]
     fn two_spawns_resolve_out_of_order() {
         let info = Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             parent: None,
             workflow_type: "TwoSpawns".into(),
         };
         let h = vec![
-            Event::WorkflowStarted { input: serde_json::to_vec(&()).unwrap() },
-            Event::ActivityScheduled { seq: 0, activity_type: "Add".into(), input: add_input(1, 1), retry: RetryPolicy::none() },
-            Event::ActivityScheduled { seq: 1, activity_type: "Add".into(), input: add_input(2, 2), retry: RetryPolicy::none() },
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::ActivityScheduled {
+                seq: 0,
+                activity_type: "Add".into(),
+                input: add_input(1, 1),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityScheduled {
+                seq: 1,
+                activity_type: "Add".into(),
+                input: add_input(2, 2),
+                retry: RetryPolicy::none(),
+            },
             // Branch B (seq 1) completes BEFORE branch A (seq 0).
-            Event::ActivityCompleted { seq: 1, output: serde_json::to_vec(&4i64).unwrap() },
-            Event::ActivityCompleted { seq: 0, output: serde_json::to_vec(&2i64).unwrap() },
+            Event::ActivityCompleted {
+                seq: 1,
+                output: serde_json::to_vec(&4i64).unwrap(),
+            },
+            Event::ActivityCompleted {
+                seq: 0,
+                output: serde_json::to_vec(&2i64).unwrap(),
+            },
         ];
         let outcome = cold_replay::<TwoSpawns>(info, &h).unwrap();
         let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
-        assert_eq!(out, 24, "va=2 (A=1+1), vb=4 (B=2+2) -> 2*10+4 even though B resolved first");
+        assert_eq!(
+            out, 24,
+            "va=2 (A=1+1), vb=4 (B=2+2) -> 2*10+4 even though B resolved first"
+        );
         assert_eq!(outcome.commands.len(), 2);
     }
 }

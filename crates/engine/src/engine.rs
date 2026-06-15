@@ -24,12 +24,18 @@ pub struct RunCompleted {
 }
 
 type ReplayFn = Arc<
-    dyn Fn(workflow::Info, &[workflow::Event]) -> Result<workflow::ReplayOutcome, workflow::Nondeterminism>
+    dyn Fn(
+            workflow::Info,
+            &[workflow::Event],
+        ) -> Result<workflow::ReplayOutcome, workflow::Nondeterminism>
         + Send
         + Sync,
 >;
 type RunnerFn = Arc<
-    dyn Fn(activity::Context, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, activity::Error>> + Send>>
+    dyn Fn(
+            activity::Context,
+            Vec<u8>,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, activity::Error>> + Send>>
         + Send
         + Sync,
 >;
@@ -44,12 +50,21 @@ pub struct Engine {
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
 }
 
 impl Engine {
     pub fn new(history: Arc<dyn History>, queue: Arc<dyn TaskQueue>) -> Self {
-        Self { history, queue, workflows: HashMap::new(), activities: HashMap::new(), observer: None }
+        Self {
+            history,
+            queue,
+            workflows: HashMap::new(),
+            activities: HashMap::new(),
+            observer: None,
+        }
     }
 
     pub fn register_workflow<W: workflow::Definition>(&mut self) {
@@ -64,11 +79,13 @@ impl Engine {
             A::TYPE.to_string(),
             Arc::new(|ctx, bytes| {
                 Box::pin(async move {
-                    let input: A::Input = serde_json::from_slice(&bytes)
-                        .map_err(|e| activity::Error::fatal(format!("activity input deserialize: {e}")))?;
+                    let input: A::Input = serde_json::from_slice(&bytes).map_err(|e| {
+                        activity::Error::fatal(format!("activity input deserialize: {e}"))
+                    })?;
                     let out = A::run(ctx, input).await?;
-                    serde_json::to_vec(&out)
-                        .map_err(|e| activity::Error::fatal(format!("activity output serialize: {e}")))
+                    serde_json::to_vec(&out).map_err(|e| {
+                        activity::Error::fatal(format!("activity output serialize: {e}"))
+                    })
                 })
             }),
         );
@@ -100,7 +117,9 @@ impl Handle {
                 }
                 Some((_, ExecStatus::Completed, None)) => anyhow::bail!("completed without result"),
                 Some((_, ExecStatus::Failed, _)) => anyhow::bail!("workflow failed"),
-                Some((_, ExecStatus::Running, _)) => tokio::time::sleep(Duration::from_millis(5)).await,
+                Some((_, ExecStatus::Running, _)) => {
+                    tokio::time::sleep(Duration::from_millis(5)).await
+                }
                 None => anyhow::bail!("no execution for workflow id {}", self.workflow_id),
             }
         }
@@ -120,7 +139,11 @@ impl Engine {
             .history
             .create_execution(&candidate, &opts.id, W::TYPE, &input_bytes)
             .await?;
-        Ok(Handle { run_id, workflow_id: opts.id, history: self.history.clone() })
+        Ok(Handle {
+            run_id,
+            workflow_id: opts.id,
+            history: self.history.clone(),
+        })
     }
 }
 
@@ -195,7 +218,12 @@ impl Engine {
         let mut new_timers = Vec::new();
         for cmd in &outcome.commands {
             match cmd {
-                workflow::Command::ScheduleActivity { seq, activity_type, input, retry } => {
+                workflow::Command::ScheduleActivity {
+                    seq,
+                    activity_type,
+                    input,
+                    retry,
+                } => {
                     if recorded.contains(seq) {
                         continue;
                     }
@@ -220,6 +248,9 @@ impl Engine {
                         seq: *seq,
                         duration_ms: *duration_ms,
                     });
+                    // `fire_at` is wall-clock and deliberately NOT replayed: the
+                    // duration is the deterministic, divergence-checked datum, and
+                    // this absolute deadline must never feed back into replay (§5.3).
                     new_timers.push(NewTimer {
                         seq: *seq as i64,
                         fire_at: now_ms() + *duration_ms as i64,
@@ -234,7 +265,13 @@ impl Engine {
             None => (ExecStatus::Running, None),
         };
 
-        let commit = TurnCommit { events: new_events, new_tasks, new_timers, status, result: result.clone() };
+        let commit = TurnCommit {
+            events: new_events,
+            new_tasks,
+            new_timers,
+            status,
+            result: result.clone(),
+        };
         self.history.commit_turn(&run_id, &commit).await?;
 
         if status != ExecStatus::Running {
@@ -300,7 +337,9 @@ impl Engine {
                         .await?;
                 } else {
                     let delay = lease.retry.backoff_ms(lease.attempt + 1) as i64;
-                    self.queue.reschedule_activity(&lease, now_ms() + delay).await?;
+                    self.queue
+                        .reschedule_activity(&lease, now_ms() + delay)
+                        .await?;
                 }
             }
         }

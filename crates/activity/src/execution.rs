@@ -12,7 +12,10 @@ mod tests {
 
     #[test]
     fn round_trips_through_json() {
-        let e = Execution { workflow_id: "order-123".into(), run_id: "run-abc".into() };
+        let e = Execution {
+            workflow_id: "order-123".into(),
+            run_id: "run-abc".into(),
+        };
         let json = serde_json::to_string(&e).unwrap();
         let back: Execution = serde_json::from_str(&json).unwrap();
         assert_eq!(e, back);
