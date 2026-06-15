@@ -159,6 +159,48 @@ impl History for Sqlite {
             )?;
         }
 
+        for child in &commit.new_children {
+            tx.execute(
+                "INSERT INTO executions \
+                 (run_id, workflow_id, workflow_type, parent_run_id, parent_seq, input, status) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running')",
+                params![
+                    child.child_run_id,
+                    child.child_workflow_id,
+                    child.workflow_type,
+                    run_id,  // parent's run_id
+                    child.seq,
+                    child.input
+                ],
+            )?;
+            let (cseq, ckind, cpayload) = encode(&Event::WorkflowStarted {
+                input: child.input.clone(),
+            });
+            tx.execute(
+                "INSERT INTO history (run_id, event_id, seq, kind, payload, ts) \
+                 VALUES (?1, 1, ?2, ?3, ?4, ?5)",
+                params![child.child_run_id, cseq, ckind, cpayload, now_ms()],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO runnable (run_id, since) VALUES (?1, ?2)",
+                params![child.child_run_id, now_ms()],
+            )?;
+        }
+
+        if let Some(notify) = &commit.parent_notify {
+            let (pseq, pkind, ppayload) = encode(&notify.event);
+            let pid = next_event_id(&tx, &notify.parent_run_id)?;
+            tx.execute(
+                "INSERT INTO history (run_id, event_id, seq, kind, payload, ts) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![notify.parent_run_id, pid, pseq, pkind, ppayload, now_ms()],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO runnable (run_id, since) VALUES (?1, ?2)",
+                params![notify.parent_run_id, now_ms()],
+            )?;
+        }
+
         tx.execute(
             "UPDATE executions SET status = ?2, result = ?3 WHERE run_id = ?1",
             params![run_id, commit.status.as_str(), commit.result],
@@ -411,6 +453,111 @@ mod tests {
                 .await
                 .unwrap(),
             Some("run-1".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_turn_creates_child_execution_and_marks_it_runnable() {
+        use engine::NewChild;
+        let db = Sqlite::open_in_memory().unwrap();
+        db.create_execution("parent-run", "parent-wf", "Parent", b"in")
+            .await
+            .unwrap();
+
+        let commit = TurnCommit {
+            events: vec![Event::ChildScheduled {
+                seq: 0,
+                workflow_type: "Child".into(),
+                input: b"5".to_vec(),
+            }],
+            new_tasks: vec![],
+            new_timers: vec![],
+            new_children: vec![NewChild {
+                seq: 0,
+                child_run_id: "child-run".into(),
+                child_workflow_id: "parent-wf::child::0".into(),
+                workflow_type: "Child".into(),
+                input: b"5".to_vec(),
+            }],
+            parent_notify: None,
+            status: ExecStatus::Running,
+            result: None,
+        };
+        db.commit_turn("parent-run", &commit).await.unwrap();
+
+        // The child execution exists, is running, and links back to the parent.
+        let meta = db.load_run("child-run").await.unwrap().unwrap();
+        assert_eq!(meta.workflow_type, "Child");
+        assert_eq!(meta.status, ExecStatus::Running);
+        assert_eq!(meta.parent_run_id.as_deref(), Some("parent-run"));
+        assert_eq!(meta.parent_seq, Some(0));
+
+        // The child has a WorkflowStarted event and is runnable.
+        let h = db.read_history("child-run").await.unwrap();
+        assert_eq!(h.len(), 1);
+        assert!(matches!(h[0].event, Event::WorkflowStarted { .. }));
+        assert_eq!(
+            <Sqlite as engine::TaskQueue>::next_runnable(&db)
+                .await
+                .unwrap(),
+            Some("child-run".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_turn_notifies_parent_with_child_completed() {
+        use engine::ParentNotify;
+        let db = Sqlite::open_in_memory().unwrap();
+        db.create_execution("parent-run", "parent-wf", "Parent", b"in")
+            .await
+            .unwrap();
+        db.create_execution("child-run", "child-wf", "Child", b"5")
+            .await
+            .unwrap();
+        // Drive both runnable flags away so we can observe the notify re-arm one.
+        let idle = TurnCommit {
+            events: vec![],
+            new_tasks: vec![],
+            new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
+            status: ExecStatus::Running,
+            result: None,
+        };
+        db.commit_turn("parent-run", &idle).await.unwrap();
+
+        // The child's terminal turn: complete the child AND notify the parent.
+        let commit = TurnCommit {
+            events: vec![],
+            new_tasks: vec![],
+            new_timers: vec![],
+            new_children: vec![],
+            parent_notify: Some(ParentNotify {
+                parent_run_id: "parent-run".into(),
+                event: Event::ChildCompleted {
+                    seq: 0,
+                    result: workflow::ChildResult::Completed(b"10".to_vec()),
+                },
+            }),
+            status: ExecStatus::Completed,
+            result: Some(b"10".to_vec()),
+        };
+        db.commit_turn("child-run", &commit).await.unwrap();
+
+        // ChildCompleted landed in the PARENT's history (with the parent's seq).
+        let h = db.read_history("parent-run").await.unwrap();
+        match &h.last().unwrap().event {
+            Event::ChildCompleted { seq: 0, result } => {
+                assert_eq!(*result, workflow::ChildResult::Completed(b"10".to_vec()));
+            }
+            other => panic!("expected ChildCompleted, got {other:?}"),
+        }
+        // The parent is runnable again; the child is not.
+        assert_eq!(
+            <Sqlite as engine::TaskQueue>::next_runnable(&db)
+                .await
+                .unwrap(),
+            Some("parent-run".into())
         );
     }
 
