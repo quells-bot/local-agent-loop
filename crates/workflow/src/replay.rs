@@ -990,4 +990,59 @@ mod tests {
             err.detail
         );
     }
+
+    // --- Pass 5a: prefix-replay stability guard (spec §14) -------------------
+
+    /// Replaying every prefix of a history yields a command stream that only GROWS:
+    /// the stream for prefix k+1 starts with the stream for prefix k. This is the
+    /// spec §14 "force-evict at every point" determinism guard without a live cache —
+    /// evicting and cold-replaying at any history position reproduces prior commands.
+    fn assert_prefix_stable<W: crate::Definition>(info: Info, full: &[Event]) {
+        let mut prev: Vec<Command> = Vec::new();
+        for k in 1..=full.len() {
+            let outcome = cold_replay::<W>(info.clone(), &full[..k])
+                .unwrap_or_else(|e| panic!("prefix {k} diverged: {e}"));
+            assert!(
+                outcome.commands.len() >= prev.len(),
+                "prefix {k}: command stream shrank ({} < {})",
+                outcome.commands.len(),
+                prev.len()
+            );
+            assert!(
+                outcome.commands.starts_with(&prev),
+                "prefix {k}: command stream rewrote an earlier command"
+            );
+            prev = outcome.commands;
+        }
+    }
+
+    #[test]
+    fn prefix_replay_is_stable_activities() {
+        assert_prefix_stable::<Sum>(info(), &full_history());
+    }
+
+    #[test]
+    fn prefix_replay_is_stable_timer_then_activity() {
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::TimerStarted {
+                seq: 0,
+                duration_ms: 500,
+            },
+            Event::TimerFired { seq: 0 },
+            Event::ActivityScheduled {
+                seq: 1,
+                activity_type: "Add".into(),
+                input: add_input(1, 2),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityCompleted {
+                seq: 1,
+                output: serde_json::to_vec(&3i64).unwrap(),
+            },
+        ];
+        assert_prefix_stable::<Nap>(nap_info(), &h);
+    }
 }
