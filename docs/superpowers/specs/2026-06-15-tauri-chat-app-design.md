@@ -55,14 +55,31 @@ involvement; `src-tauri` depends on `demo` and registers its four types.
 
 ## 4. Demo flow (`crates/demo`)
 
+**Type house style.** Every activity and every workflow takes a bespoke named
+*params* struct and returns a bespoke named *results* struct — never a bare
+primitive or tuple, even when trivial. This is what makes version evolution
+backwards-compatible: a new business requirement becomes an added field, not a
+breaking signature change that forces a "v2" of the activity/workflow. Each type
+derives `Serialize, Deserialize, Clone, Debug`. Structurally identical siblings
+(e.g. `SumParams` vs `SumChildParams`) stay separate types so they can evolve
+independently.
+
 ```
-Parse        activity:  String   -> Vec<i64>
-SumActivity  activity:  Vec<i64> -> i64
-SumChild     workflow:  Vec<i64> -> i64     ( ctx.activity::<SumActivity>(nums).await )
-Parent       workflow:  String   -> i64
-    let nums = ctx.activity::<Parse>(text).await?;    // parse failure => workflow Failed
-    let sum  = ctx.child_workflow::<SumChild>(nums).await?;
-    Ok(sum)
+Parse        activity:  ParseParams { text: String }      -> ParseResult { values: Vec<i64> }
+SumActivity  activity:  SumParams { values: Vec<i64> }    -> SumResult { total: i64 }
+SumChild     workflow:  SumChildParams { values: Vec<i64> } -> SumChildResult { total: i64 }
+Parent       workflow:  ParentParams { text: String }     -> ParentResult { total: i64 }
+```
+
+```rust
+// SumChild
+let summed = ctx.activity::<SumActivity>(SumParams { values: params.values }).await?;
+Ok(SumChildResult { total: summed.total })
+
+// Parent
+let parsed = ctx.activity::<Parse>(ParseParams { text: params.text }).await?; // parse failure => Failed
+let summed = ctx.child_workflow::<SumChild>(SumChildParams { values: parsed.values }).await?;
+Ok(ParentResult { total: summed.total })
 ```
 
 This single flow exercises a parent activity, error propagation (`?` converts
@@ -93,12 +110,16 @@ async fn submit(
     engine: State<'_, Arc<Engine>>,
 ) -> Result<String /* run_id */, String> {
     engine
-        .start_workflow::<Parent>(text, StartOptions { id: workflow_id })
+        .start_workflow::<Parent>(ParentParams { text }, StartOptions { id: workflow_id })
         .await
         .map(|h| h.run_id().to_string())
         .map_err(|e| e.to_string())
 }
 ```
+
+The command keeps a flat IPC signature (`text`, `workflow_id`) and wraps `text`
+into `ParentParams` at the boundary, so the frontend stays unaware of the
+workflow's params struct.
 
 The frontend generates `workflow_id` (`crypto.randomUUID()`) per submission, so
 start-dedup (§7.1) and event correlation both come for free.
@@ -114,8 +135,9 @@ engine.on_run_completed(move |ev: RunCompleted| {
         run_id: ev.run_id,
         status: match ev.status { Completed => "completed", _ => "failed" },
         // Decode the stored bytes as a generic JSON value so src-tauri stays
-        // demo-agnostic (not hard-coded to i64). On `completed` this is the
-        // number; on `failed` it is { "message": "..." }.
+        // demo-agnostic (not hard-coded to ParentResult). On `completed` this is
+        // the ParentResult object { "total": N }; on `failed` it is the
+        // workflow::Error object { "message": "..." }.
         result: ev.result
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()),
     };
@@ -128,7 +150,7 @@ Emitted event shape:
 ```jsonc
 { "workflow_id": "...", "run_id": "...",
   "status": "completed" | "failed",
-  "result": <JSON value | null> }   // number when completed, {message} when failed
+  "result": <JSON value | null> }   // {total} when completed, {message} when failed
 ```
 
 The frontend interprets `result` by `status`. `engine` takes no `tauri`
@@ -169,8 +191,8 @@ during implementation, not a design change.
    * @property {string} id        // == workflow_id, the correlation key
    * @property {string} text      // the submitted input
    * @property {'pending'|'done'|'error'} status
-   * @property {number} [output]  // set when status === 'done'
-   * @property {string} [error]   // set when status === 'error'
+   * @property {number} [output]  // set when status === 'done' (from result.total)
+   * @property {string} [error]   // set when status === 'error' (from result.message)
    */
   ```
 
@@ -181,7 +203,8 @@ during implementation, not a design change.
 - **Pure transition for testability:** `applyCompletion(messages, payload)` is a
   pure function in its own module. Given the current array and an event payload,
   it returns the next array with the matching message (by `workflow_id`) moved
-  to `done` (with `output`) or `error` (with `payload.result.message`). This is
+  to `done` (`output` ← `payload.result.total`) or `error` (`error` ←
+  `payload.result.message`). This is
   the frontend's unit-test seam (Vitest), keeping the "unit-testable" ethos
   without a full UI harness.
 - **Components:** one `ChatView` — a scrolling message list, a text input, and a
@@ -202,13 +225,14 @@ during implementation, not a design change.
 quiescence (the `end_to_end.rs` pattern: alternate `process_one_runnable` /
 `process_one_activity` until neither makes progress):
 
-- `"1 2 3"` → `6`
-- `"10 20 30"` → `60`
-- `""` → `0`
-- `"-5 10"` → `5`
-- `"1 two 3"` → run `Failed`, error message contains `two`
+- `"1 2 3"` → `ParentResult { total: 6 }`
+- `"10 20 30"` → `total: 60`
+- `""` → `total: 0`
+- `"-5 10"` → `total: 5`
+- `"1 two 3"` → run `Failed`, `workflow::Error` message contains `two`
 
-Plus direct unit tests of the parse logic and `SumActivity::run`.
+Plus direct unit tests of the parse logic and `SumActivity::run` (asserting the
+`ParseResult` / `SumResult` payloads).
 
 **Frontend** — Vitest unit test of `applyCompletion` (pending → done; pending →
 error; non-matching `workflow_id` left untouched). The UI itself is verified
