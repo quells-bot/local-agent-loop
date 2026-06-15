@@ -2,7 +2,6 @@ use crate::RetryPolicy;
 use serde::{Deserialize, Serialize};
 
 /// Issued by workflow futures, drained by the driver each turn (spec §3).
-/// Pass 4 adds StartChild.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
     ScheduleActivity {
@@ -14,6 +13,13 @@ pub enum Command {
     StartTimer {
         seq: u64,
         duration_ms: u64,
+    },
+    /// Start a child workflow (spec §5.4, §9). Allocates a `seq`; the driver records
+    /// it as `Event::ChildScheduled` and creates the child execution.
+    StartChild {
+        seq: u64,
+        workflow_type: String,
+        input: Vec<u8>,
     },
 }
 
@@ -38,5 +44,13 @@ mod tests {
         };
         let back: Command = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         assert_eq!(t, back);
+
+        let child = Command::StartChild {
+            seq: 3,
+            workflow_type: "Ship".into(),
+            input: b"{}".to_vec(),
+        };
+        let back: Command = serde_json::from_str(&serde_json::to_string(&child).unwrap()).unwrap();
+        assert_eq!(child, back);
     }
 }

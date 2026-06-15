@@ -21,6 +21,9 @@ pub(crate) struct ContextInner {
     // Inbound signal payloads, buffered per name (spec §6.2). Rebuilt identically on
     // every replay because history replays in event_id order (Invariant 10).
     pub(crate) signals: RefCell<HashMap<String, VecDeque<Vec<u8>>>>,
+    // Child workflow outcomes, keyed by the parent's StartChild command `seq` (spec
+    // §5.4). Resolves `ChildFuture` exactly like `results` resolves `ActivityFuture`.
+    pub(crate) child_results: RefCell<HashMap<u64, Result<Vec<u8>, crate::Error>>>,
 }
 
 #[derive(Clone)]
@@ -40,6 +43,7 @@ impl Context {
                 fired: RefCell::new(HashSet::new()),
                 new_spawns: RefCell::new(Vec::new()),
                 signals: RefCell::new(HashMap::new()),
+                child_results: RefCell::new(HashMap::new()),
             }),
         }
     }
@@ -78,6 +82,25 @@ impl Context {
     /// Driver applies exactly one recorded outcome before each poll (spec §4.1).
     pub fn apply_result(&self, seq: u64, result: CommandResult) {
         self.inner.results.borrow_mut().insert(seq, result);
+    }
+
+    /// Start a child workflow (the `workflow.ExecuteChildWorkflow` analog, spec §9).
+    /// `seq` is allocated HERE (creation time, spec §3/Inv 2). The returned future
+    /// emits `StartChild` once and resolves to the child's typed output (or error).
+    pub fn child_workflow<W: crate::Definition>(
+        &self,
+        input: W::Input,
+    ) -> crate::future::ChildFuture<W> {
+        let seq = self.inner.next_seq.get();
+        self.inner.next_seq.set(seq + 1);
+        let bytes = serde_json::to_vec(&input).expect("child input serializes");
+        crate::future::ChildFuture::new(self.inner.clone(), seq, bytes)
+    }
+
+    /// Driver/replay applies one recorded child outcome before a poll (one event per
+    /// turn, spec §4.1/§5.4): record it so the next poll resolves the `ChildFuture`.
+    pub fn apply_child_result(&self, seq: u64, result: Result<Vec<u8>, crate::Error>) {
+        self.inner.child_results.borrow_mut().insert(seq, result);
     }
 
     /// Driver drains commands emitted during the poll it just ran.

@@ -33,7 +33,7 @@ mod event;
 pub use event::Event;
 
 mod result;
-pub use result::CommandResult;
+pub use result::{ChildResult, CommandResult};
 
 mod error;
 pub use error::Error;
@@ -42,7 +42,7 @@ mod context;
 pub use context::Context;
 
 mod future;
-pub use future::{ActivityFuture, TimerFuture};
+pub use future::{ActivityFuture, ChildFuture, TimerFuture};
 
 mod spawn;
 pub use spawn::SpawnHandle;

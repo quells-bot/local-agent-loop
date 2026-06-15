@@ -225,6 +225,8 @@ mod tests {
                 next_run_at: 0,
             }],
             new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -345,6 +347,8 @@ mod tests {
                 next_run_at: 0,
             }],
             new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -378,6 +382,8 @@ mod tests {
                 next_run_at: future,
             }],
             new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -403,6 +409,8 @@ mod tests {
             }],
             new_tasks: vec![],
             new_timers: vec![engine::NewTimer { seq: 0, fire_at: 0 }],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -443,6 +451,8 @@ mod tests {
                 seq: 0,
                 fire_at: now_ms() + 60_000,
             }],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
