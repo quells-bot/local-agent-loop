@@ -1,6 +1,8 @@
 use crate::types::{ParseParams, ParseResult, SumParams, SumResult};
 use activity::{Context, Definition, Error};
 
+/// Pure parse: split on whitespace, parse each token as i64. Empty input is a
+/// valid empty list (spec §4). A bad token is a fatal (non-retryable) error.
 fn parse_ints(text: &str) -> Result<Vec<i64>, String> {
     text.split_whitespace()
         .map(|tok| {
