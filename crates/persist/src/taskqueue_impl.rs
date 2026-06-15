@@ -5,6 +5,10 @@ use workflow::{CommandResult, Event, RetryPolicy};
 
 use crate::sqlite::{now_ms, Sqlite};
 
+/// How long a leased activity may run before the reclaim sweep considers it dead
+/// and returns it to pending. Generous for desktop scale (spec §5.2).
+const LEASE_TTL_MS: i64 = 30_000;
+
 #[async_trait::async_trait]
 impl TaskQueue for Sqlite {
     async fn next_runnable(&self) -> anyhow::Result<Option<String>> {
@@ -64,9 +68,9 @@ impl TaskQueue for Sqlite {
 
         let new_attempt = attempt + 1;
         tx.execute(
-            "UPDATE activity_tasks SET status = 'running', attempt = ?3 \
+            "UPDATE activity_tasks SET status = 'running', attempt = ?3, lease_expires_at = ?4 \
              WHERE run_id = ?1 AND seq = ?2",
-            params![run_id, seq, new_attempt],
+            params![run_id, seq, new_attempt, now + LEASE_TTL_MS],
         )?;
         tx.commit()?;
 
@@ -136,7 +140,7 @@ impl TaskQueue for Sqlite {
     ) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE activity_tasks SET status = 'pending', next_run_at = ?3 \
+            "UPDATE activity_tasks SET status = 'pending', next_run_at = ?3, lease_expires_at = NULL \
              WHERE run_id = ?1 AND seq = ?2",
             params![lease.run_id, lease.seq, next_run_at],
         )?;
@@ -184,6 +188,16 @@ impl TaskQueue for Sqlite {
         tx.commit()?;
         Ok(true)
     }
+
+    async fn reclaim_expired_activities(&self) -> anyhow::Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE activity_tasks SET status = 'pending', lease_expires_at = NULL \
+             WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?1",
+            params![now_ms()],
+        )?;
+        Ok(n as u64)
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +230,49 @@ mod tests {
         };
         db.commit_turn("run-1", &commit).await.unwrap();
         db
+    }
+
+    #[tokio::test]
+    async fn expired_lease_is_reclaimed_and_releasable() {
+        let db = db_with_task().await;
+        let lease = db.lease_activity().await.unwrap().unwrap();
+        assert_eq!(lease.attempt, 1);
+        assert!(
+            db.lease_activity().await.unwrap().is_none(),
+            "a running task is not leasable"
+        );
+
+        // Simulate the worker crashing and the lease TTL elapsing.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE activity_tasks SET lease_expires_at = 0 WHERE run_id = ?1 AND seq = ?2",
+                params![lease.run_id, lease.seq],
+            )
+            .unwrap();
+
+        assert_eq!(db.reclaim_expired_activities().await.unwrap(), 1);
+        let released = db
+            .lease_activity()
+            .await
+            .unwrap()
+            .expect("reclaimed task is leasable again");
+        assert_eq!(
+            released.attempt, 2,
+            "re-lease after a crash counts as another attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_lease_is_not_reclaimed() {
+        let db = db_with_task().await;
+        let _lease = db.lease_activity().await.unwrap().unwrap(); // TTL is in the future
+        assert_eq!(
+            db.reclaim_expired_activities().await.unwrap(),
+            0,
+            "a live lease must not be reclaimed"
+        );
     }
 
     #[tokio::test]

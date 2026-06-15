@@ -61,4 +61,9 @@ pub trait TaskQueue: Send + Sync {
     /// if no timer is due. Single combined method (no lease/retry — timers carry no
     /// side effect) so two service iterations cannot double-fire the same timer.
     async fn fire_due_timer(&self) -> anyhow::Result<bool>;
+
+    /// Crash recovery: return in-flight leases whose TTL has elapsed (`status =
+    /// 'running'` with `lease_expires_at <= now`) to `pending`, so a fresh worker
+    /// can re-lease them. Returns the number reclaimed (spec §5.2 — at-least-once).
+    async fn reclaim_expired_activities(&self) -> anyhow::Result<u64>;
 }

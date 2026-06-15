@@ -355,6 +355,13 @@ impl Engine {
 }
 
 impl Engine {
+    /// Reclaim expired in-flight activity leases (spec §5.2). Returns the count.
+    pub async fn reclaim_expired_activities(&self) -> anyhow::Result<u64> {
+        self.queue.reclaim_expired_activities().await
+    }
+}
+
+impl Engine {
     /// Spawn the driver and activity-worker loops as background tokio tasks and
     /// return a shared handle. Use the `process_one_*` methods directly in tests
     /// for deterministic stepping.
@@ -400,6 +407,16 @@ impl Engine {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                 }
+            }
+        });
+
+        let sweeper = engine.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(err) = sweeper.reclaim_expired_activities().await {
+                    eprintln!("lease sweep error: {err:#}");
+                }
+                tokio::time::sleep(Duration::from_secs(15)).await;
             }
         });
 

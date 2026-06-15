@@ -14,6 +14,7 @@ impl Sqlite {
     pub fn open(path: &str) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -22,9 +23,28 @@ impl Sqlite {
     pub fn open_in_memory() -> anyhow::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+}
+
+/// Idempotent schema evolution for DBs created before a column existed. SQLite has
+/// no `ADD COLUMN IF NOT EXISTS`, so we add and swallow the duplicate-column error.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    match conn.execute(
+        "ALTER TABLE activity_tasks ADD COLUMN lease_expires_at INTEGER",
+        [],
+    ) {
+        Ok(_) => Ok(()),
+        // Fresh DBs already have the column (from SCHEMA); old DBs get it added above.
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg)))
+            if msg.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }
 
