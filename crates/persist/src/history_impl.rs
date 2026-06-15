@@ -13,7 +13,7 @@ fn encode(event: &Event) -> (Option<i64>, &'static str, Vec<u8>) {
         | Event::ActivityFailed { seq, .. }
         | Event::TimerStarted { seq, .. }
         | Event::TimerFired { seq } => Some(*seq as i64),
-        Event::WorkflowStarted { .. } => None,
+        Event::WorkflowStarted { .. } | Event::SignalReceived { .. } => None,
     };
     let payload = serde_json::to_vec(event).expect("event serializes");
     (seq, event.kind(), payload)
@@ -265,5 +265,47 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn commit_turn_round_trips_signal_received_with_null_seq() {
+        let db = Sqlite::open_in_memory().unwrap();
+        db.create_execution("run-1", "wf-A", "T", b"in")
+            .await
+            .unwrap();
+
+        let commit = TurnCommit {
+            events: vec![Event::SignalReceived {
+                name: "approve".into(),
+                payload: b"true".to_vec(),
+            }],
+            new_tasks: vec![],
+            new_timers: vec![],
+            status: ExecStatus::Running,
+            result: None,
+        };
+        db.commit_turn("run-1", &commit).await.unwrap();
+
+        let h = db.read_history("run-1").await.unwrap();
+        match &h.last().unwrap().event {
+            Event::SignalReceived { name, payload } => {
+                assert_eq!(name, "approve");
+                assert_eq!(payload, b"true");
+            }
+            other => panic!("expected SignalReceived, got {other:?}"),
+        }
+
+        // Inbound events carry no seq: the history.seq column must be NULL.
+        let seq: Option<i64> = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT seq FROM history WHERE run_id = 'run-1' ORDER BY event_id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(seq, None, "inbound events carry no seq (spec §6, §11)");
     }
 }
