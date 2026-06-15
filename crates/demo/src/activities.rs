@@ -1,8 +1,6 @@
-use crate::types::{ParseParams, ParseResult};
+use crate::types::{ParseParams, ParseResult, SumParams, SumResult};
 use activity::{Context, Definition, Error};
 
-/// Pure parse: split on whitespace, parse each token as i64. Empty input is a
-/// valid empty list (spec §4). A bad token is a fatal (non-retryable) error.
 fn parse_ints(text: &str) -> Result<Vec<i64>, String> {
     text.split_whitespace()
         .map(|tok| {
@@ -25,11 +23,36 @@ impl Definition for Parse {
     }
 }
 
-pub struct SumActivity; // implemented in Task 3
+pub struct SumActivity;
+
+#[async_trait::async_trait]
+impl Definition for SumActivity {
+    type Input = SumParams;
+    type Output = SumResult;
+    const TYPE: &'static str = "Sum";
+    async fn run(_ctx: Context, params: SumParams) -> Result<SumResult, Error> {
+        Ok(SumResult {
+            total: params.values.iter().sum(),
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use activity::{Execution, Info};
+
+    fn test_ctx() -> Context {
+        Context::new(Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            activity_id: "0".into(),
+            activity_type: "Sum".into(),
+            attempt: 1,
+        })
+    }
 
     #[test]
     fn parses_space_separated_integers() {
@@ -51,5 +74,21 @@ mod tests {
     fn bad_token_is_an_error_naming_the_token() {
         let err = parse_ints("1 two 3").unwrap_err();
         assert!(err.contains("two"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn sum_activity_totals_values() {
+        let out = SumActivity::run(test_ctx(), SumParams { values: vec![1, 2, 3] })
+            .await
+            .unwrap();
+        assert_eq!(out, SumResult { total: 6 });
+    }
+
+    #[tokio::test]
+    async fn sum_activity_empty_is_zero() {
+        let out = SumActivity::run(test_ctx(), SumParams { values: vec![] })
+            .await
+            .unwrap();
+        assert_eq!(out, SumResult { total: 0 });
     }
 }
