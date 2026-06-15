@@ -21,11 +21,26 @@ pub enum Command {
         workflow_type: String,
         input: Vec<u8>,
     },
+    /// Request to record a change-version marker (spec §14, the `GetVersion` analog).
+    /// Carries NO `seq` — it is divergence-exempt like an inbound event; the driver
+    /// records it as `Event::Patched` deduped by `change_id`.
+    RecordPatch {
+        change_id: String,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_patch_round_trips_through_json() {
+        let p = Command::RecordPatch {
+            change_id: "ship-v2".into(),
+        };
+        let back: Command = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(p, back);
+    }
 
     #[test]
     fn round_trips_through_json() {

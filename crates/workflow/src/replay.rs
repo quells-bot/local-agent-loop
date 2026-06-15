@@ -114,6 +114,8 @@ pub fn cold_replay<W: crate::Definition>(
                     input: input.clone(),
                 },
             )),
+            // RecordPatch carries no seq and is divergence-exempt (spec §14, Invariant 9).
+            Command::RecordPatch { .. } => None,
         }
     }
 
@@ -178,6 +180,9 @@ pub fn cold_replay<W: crate::Definition>(
             Event::ChildCompleted { seq, result } => {
                 applied.push(Applied::Child(*seq, result.clone().into()));
             }
+            // Patched carries no seq and is divergence-exempt (spec §14, Invariant 9).
+            // The ctx.patched() machinery (later pass) reads these; replay ignores them here.
+            Event::Patched { .. } => {}
         }
     }
 

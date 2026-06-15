@@ -49,6 +49,12 @@ pub enum Event {
         seq: u64,
         result: crate::result::ChildResult,
     },
+    /// Change-version marker (spec §14). Written the first time new code runs a
+    /// `ctx.patched(id)` path; carries NO `seq` and is divergence-exempt (Invariant 9),
+    /// like `SignalReceived`. Seeded back into `ctx` on replay so `patched` is stable.
+    Patched {
+        change_id: String,
+    },
 }
 
 impl Event {
@@ -64,6 +70,7 @@ impl Event {
             Event::SignalReceived { .. } => "SignalReceived",
             Event::ChildScheduled { .. } => "ChildScheduled",
             Event::ChildCompleted { .. } => "ChildCompleted",
+            Event::Patched { .. } => "Patched",
         }
     }
 }
@@ -71,6 +78,16 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patched_kind_and_round_trip() {
+        let e = Event::Patched {
+            change_id: "ship-v2".into(),
+        };
+        assert_eq!(e.kind(), "Patched");
+        let back: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(e, back);
+    }
 
     #[test]
     fn kind_matches_variant() {
