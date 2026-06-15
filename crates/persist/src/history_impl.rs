@@ -168,7 +168,7 @@ impl History for Sqlite {
                     child.child_run_id,
                     child.child_workflow_id,
                     child.workflow_type,
-                    run_id,  // parent's run_id
+                    run_id, // parent's run_id
                     child.seq,
                     child.input
                 ],
