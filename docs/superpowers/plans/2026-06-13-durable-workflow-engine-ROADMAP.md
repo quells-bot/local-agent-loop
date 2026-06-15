@@ -123,8 +123,8 @@ pub struct RetryPolicy { pub max_attempts: u32, pub initial_ms: u64, pub multipl
 
 pub enum Command {                      // emitted by futures, drained by driver
     ScheduleActivity { seq: u64, activity_type: String, input: Vec<u8>, retry: RetryPolicy },
-    StartTimer { seq: u64, duration_ms: u64 },   // 2a (done)
-    // Pass 4 adds StartChild; Pass 3 adds nothing (signals are inbound)
+    StartTimer       { seq: u64, duration_ms: u64 },   // 2a (done)
+    StartChild       { seq: u64, workflow_type: String, input: Vec<u8> },          // 4a (done)
 }                                       // derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize
 
 pub enum Event {                        // history record, applied into ctx + persisted
@@ -135,13 +135,18 @@ pub enum Event {                        // history record, applied into ctx + pe
     TimerStarted      { seq: u64, duration_ms: u64 },   // 2a (done)
     TimerFired        { seq: u64 },                      // 2a (done)
     SignalReceived { name: String, payload: Vec<u8> },           // 3a (done)
-    // Pass 4: ChildCompleted;
+    ChildScheduled { seq: u64, workflow_type: String, input: Vec<u8> },                // 4a (done)
+    ChildCompleted { seq: u64, result: ChildResult },                                    // 4a (done)
     // reserved: WorkflowCancelRequested
 }                                       // derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize
                                         // method: kind(&self) -> &'static str
 
 pub enum CommandResult { ActivityCompleted(Vec<u8>), ActivityFailed(activity::Error) }
 //   From<CommandResult> for Result<Vec<u8>, activity::Error>
+
+pub enum ChildResult { Completed(Vec<u8>), Failed(crate::Error) }              // 4a (done)
+//   derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize
+//   From<ChildResult> for Result<Vec<u8>, Error>
 
 pub struct Error { pub message: String }      // workflow failure
 //   derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize; impl std::error::Error
@@ -150,6 +155,10 @@ pub struct Context { /* Rc<ContextInner>; minimal in 1a, replay state added in 1
 //   info() -> &Info  (1a);  activity::<A>(input) -> ActivityFuture, now(), random() (1b)
 //   timer/sleep(dur) -> TimerFuture (2a);  spawn(fut) -> SpawnHandle<T> (2b, workflow.Go analog)
 //   signal_channel() -> SignalChannel<T> (3a);  apply_signal(Event::SignalReceived) (3a)
+//   child_workflow<W>(input) -> ChildFuture<W> (4a);  apply_child_result(seq, result) (4a)
+
+pub struct ChildFuture<W: Definition> { /* Rc<ContextInner> + seq + input */ }    // 4a (done)
+//   Future::Output = Result<W::Output, Error>
 
 pub struct SpawnHandle<T> { /* Rc<RefCell<Option<T>>>; resolves to T when the branch completes */ }  // 2b
 // WorkflowState drives main + spawned branches to quiescence per turn (ordered scheduler, §4.4).  // 2b
@@ -171,9 +180,21 @@ pub struct SignalRecv<T> { /* Rc<ContextInner> + name; poll pops the per-name bu
 
 ```rust
 pub struct StoredEvent { pub event_id: i64, pub event: workflow::Event }
+pub struct NewChild { pub seq: i64, pub child_run_id: String, pub child_workflow_id: String,
+                      pub workflow_type: String, pub input: Vec<u8> }    // 4a (done)
+pub struct ParentNotify { pub parent_run_id: String, pub event: Event }    // 4a (done)
+
 pub struct TurnCommit { pub events: Vec<Event>, pub new_tasks: Vec<NewActivityTask>,
                         pub new_timers: Vec<NewTimer>,    // 2a (done)
+                        pub new_children: Vec<NewChild>,  // 4a (done)
+                        pub parent_notify: Option<ParentNotify>,  // 4a (done)
                         pub status: ExecStatus, pub result: Option<Vec<u8>> }
+
+pub struct RunMeta { pub run_id: String, pub workflow_id: String, pub workflow_type: String,
+                     pub status: ExecStatus,
+                     pub parent_run_id: Option<String>,  // 4a (done)
+                     pub parent_seq: Option<i64> }       // 4a (done)
+
 pub struct NewTimer { pub seq: i64, pub fire_at: i64 }    // 2a (done)
 
 #[async_trait] pub trait History {
@@ -232,7 +253,7 @@ sweeps to requeue tasks whose lease has expired.
 | 2c | Robustness hardening (lease-expiry + dead-letter) | §5.1, §5.2, §14 | `2026-06-14-pass-2c-hardening.md` | done |
 | 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | `2026-06-14-pass-3a-inbound-events-and-signal-channel.md` | done |
 | 3b | `signal_workflow` + signal-or-timeout e2e | §6.1, §7.2 | `2026-06-14-pass-3b-signal-workflow-and-e2e.md` | done |
-| 4a | Child workflows | §5.4, §9(info.parent) | _(JIT)_ | not yet authored |
+| 4a | Child workflows | §5.4, §9(info.parent) | `2026-06-14-pass-4a-child-workflows.md` | done |
 | 5a | Cache vs cold-replay equivalence + hardening | §12, §14 | _(JIT)_ | not yet authored |
 | 5b | `ctx.patched` + trait cleanup + macros lint | §4.2, §14, §15 | _(JIT)_ | not yet authored |
 
