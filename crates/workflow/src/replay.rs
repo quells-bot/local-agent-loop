@@ -51,6 +51,7 @@ pub fn cold_replay<W: crate::Definition>(
     enum Applied {
         Result(u64, CommandResult),
         Timer(u64),
+        Signal(String, Vec<u8>),
     }
     let mut recorded_sched: HashMap<u64, (String, Vec<u8>)> = HashMap::new();
     let mut recorded_timer: HashMap<u64, u64> = HashMap::new(); // seq -> duration_ms
@@ -84,6 +85,9 @@ pub fn cold_replay<W: crate::Definition>(
                 applied.push(Applied::Timer(*seq));
             }
             Event::WorkflowStarted { .. } => {}
+            Event::SignalReceived { name, payload } => {
+                applied.push(Applied::Signal(name.clone(), payload.clone()));
+            }
         }
     }
 
@@ -139,6 +143,9 @@ pub fn cold_replay<W: crate::Definition>(
                     match &applied[cursor] {
                         Applied::Result(seq, r) => state.apply_result(*seq, r.clone()),
                         Applied::Timer(seq) => state.apply_timer_fired(*seq),
+                        Applied::Signal(name, payload) => {
+                            state.apply_signal(name.clone(), payload.clone())
+                        }
                     }
                     cursor += 1;
                 } else {
@@ -568,5 +575,119 @@ mod tests {
             "va=2 (A=1+1), vb=4 (B=2+2) -> 2*10+4 even though B resolved first"
         );
         assert_eq!(outcome.commands.len(), 2);
+    }
+
+    // --- Pass 3a: signals -------------------------------------------------
+
+    // Workflow that blocks on a single signal, returning its bool payload.
+    struct WaitApprove;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for WaitApprove {
+        type Input = ();
+        type Output = bool;
+        const TYPE: &'static str = "WaitApprove";
+        async fn run(ctx: Context, _i: ()) -> Result<bool, Error> {
+            let approvals = ctx.signal_channel::<bool>("approve");
+            let v = approvals.recv().await?;
+            Ok(v)
+        }
+    }
+
+    fn wait_info() -> Info {
+        Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            parent: None,
+            workflow_type: "WaitApprove".into(),
+        }
+    }
+
+    #[test]
+    fn replays_signal_received() {
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::SignalReceived {
+                name: "approve".into(),
+                payload: serde_json::to_vec(&true).unwrap(),
+            },
+        ];
+        let outcome = cold_replay::<WaitApprove>(wait_info(), &h).unwrap();
+        let out: bool =
+            serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert!(out);
+        assert!(
+            outcome.commands.is_empty(),
+            "signals are inbound: they allocate no command and no seq"
+        );
+    }
+
+    #[test]
+    fn signal_for_other_name_leaves_recv_pending() {
+        // A signal for a DIFFERENT name must not resolve the "approve" recv.
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::SignalReceived {
+                name: "other".into(),
+                payload: serde_json::to_vec(&true).unwrap(),
+            },
+        ];
+        let outcome = cold_replay::<WaitApprove>(wait_info(), &h).unwrap();
+        assert!(
+            outcome.completion.is_none(),
+            "a signal for a different name does not wake recv()"
+        );
+    }
+
+    // Workflow that receives TWO signals of the same name, in order.
+    struct TwoRecv;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for TwoRecv {
+        type Input = ();
+        type Output = (i64, i64);
+        const TYPE: &'static str = "TwoRecv";
+        async fn run(ctx: Context, _i: ()) -> Result<(i64, i64), Error> {
+            let ch = ctx.signal_channel::<i64>("n");
+            let a = ch.recv().await?;
+            let b = ch.recv().await?;
+            Ok((a, b))
+        }
+    }
+
+    #[test]
+    fn two_signals_resolve_in_order_one_per_turn() {
+        let info = Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            parent: None,
+            workflow_type: "TwoRecv".into(),
+        };
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::SignalReceived {
+                name: "n".into(),
+                payload: serde_json::to_vec(&1i64).unwrap(),
+            },
+            Event::SignalReceived {
+                name: "n".into(),
+                payload: serde_json::to_vec(&2i64).unwrap(),
+            },
+        ];
+        let outcome = cold_replay::<TwoRecv>(info, &h).unwrap();
+        let out: (i64, i64) =
+            serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            out, (1, 2),
+            "the Nth recv pops the Nth buffered signal of that name"
+        );
     }
 }

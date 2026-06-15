@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -18,6 +18,9 @@ pub(crate) struct ContextInner {
     pub(crate) fired: RefCell<HashSet<u64>>,                  // timer seqs fired (no payload)
     // Futures spawned this turn, awaiting absorption by WorkflowState (spec §4.4).
     pub(crate) new_spawns: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
+    // Inbound signal payloads, buffered per name (spec §6.2). Rebuilt identically on
+    // every replay because history replays in event_id order (Invariant 10).
+    pub(crate) signals: RefCell<HashMap<String, VecDeque<Vec<u8>>>>,
 }
 
 #[derive(Clone)]
@@ -36,6 +39,7 @@ impl Context {
                 commands: RefCell::new(Vec::new()),
                 fired: RefCell::new(HashSet::new()),
                 new_spawns: RefCell::new(Vec::new()),
+                signals: RefCell::new(HashMap::new()),
             }),
         }
     }
@@ -99,6 +103,24 @@ impl Context {
         });
         self.inner.new_spawns.borrow_mut().push(wrapped);
         crate::SpawnHandle { slot }
+    }
+
+    /// Get the signal channel for `name` (the `workflow.GetSignalChannel` analog,
+    /// spec §6.3). Idempotent by name: every call returns a handle onto the same
+    /// per-name buffer. Allocates no command and consumes no `seq`.
+    pub fn signal_channel<T>(&self, name: &str) -> crate::SignalChannel<T> {
+        crate::SignalChannel::new(self.inner.clone(), name.to_string())
+    }
+
+    /// Driver/replay applies one recorded inbound signal before a poll (one event per
+    /// turn, spec §4.1/§6.2): push its payload onto the per-name buffer.
+    pub fn apply_signal(&self, name: String, payload: Vec<u8>) {
+        self.inner
+            .signals
+            .borrow_mut()
+            .entry(name)
+            .or_default()
+            .push_back(payload);
     }
 
     /// WorkflowState drains freshly-spawned futures into its ordered poll list.

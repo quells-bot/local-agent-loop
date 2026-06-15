@@ -29,6 +29,12 @@ pub enum Event {
     TimerFired {
         seq: u64,
     },
+    /// Inbound event (spec §6): externally-injected, carries NO `seq`. Its payload
+    /// is recorded once and replayed in `event_id` order (Invariant 10).
+    SignalReceived {
+        name: String,
+        payload: Vec<u8>,
+    },
 }
 
 impl Event {
@@ -41,6 +47,7 @@ impl Event {
             Event::ActivityFailed { .. } => "ActivityFailed",
             Event::TimerStarted { .. } => "TimerStarted",
             Event::TimerFired { .. } => "TimerFired",
+            Event::SignalReceived { .. } => "SignalReceived",
         }
     }
 }

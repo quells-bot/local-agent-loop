@@ -94,6 +94,10 @@ impl WorkflowState {
     pub fn apply_timer_fired(&self, seq: u64) {
         self.ctx.apply_timer_fired(seq);
     }
+
+    pub fn apply_signal(&self, name: String, payload: Vec<u8>) {
+        self.ctx.apply_signal(name, payload);
+    }
 }
 
 #[cfg(test)]
