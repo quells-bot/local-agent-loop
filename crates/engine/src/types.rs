@@ -51,12 +51,34 @@ pub struct NewTimer {
     pub fire_at: i64,
 }
 
+/// A child workflow to create this turn (spec §5.4). Created atomically inside the
+/// parent's decision-turn transaction so a crash can never orphan it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewChild {
+    pub seq: i64, // the parent's StartChild command seq -> child's parent_seq
+    pub child_run_id: String,
+    pub child_workflow_id: String,
+    pub workflow_type: String,
+    pub input: Vec<u8>,
+}
+
+/// A child→parent terminal notification (spec §5.4): a `ChildCompleted` event the
+/// child's terminal turn appends to its PARENT's history, marking the parent runnable
+/// — in the same transaction, so completion+notification is atomic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentNotify {
+    pub parent_run_id: String,
+    pub event: Event, // a ChildCompleted event
+}
+
 /// Everything a single decision turn commits atomically (spec §5.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnCommit {
     pub events: Vec<Event>, // new history events emitted this turn
     pub new_tasks: Vec<NewActivityTask>,
     pub new_timers: Vec<NewTimer>, // timers to enqueue this turn
+    pub new_children: Vec<NewChild>,
+    pub parent_notify: Option<ParentNotify>,
     pub status: ExecStatus,
     pub result: Option<Vec<u8>>, // Some iff status != Running
 }
@@ -95,4 +117,6 @@ pub struct RunMeta {
     pub workflow_id: String,
     pub workflow_type: String,
     pub status: ExecStatus,
+    pub parent_run_id: Option<String>,
+    pub parent_seq: Option<i64>,
 }

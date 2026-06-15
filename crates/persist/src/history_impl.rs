@@ -107,11 +107,13 @@ impl History for Sqlite {
                 },
             )
             .optional()?;
-        Ok(row.map(|(workflow_id, workflow_type, status)| RunMeta {
+       Ok(row.map(|(workflow_id, workflow_type, status)| RunMeta {
             run_id: run_id.to_string(),
             workflow_id,
             workflow_type,
             status: ExecStatus::from_str(&status).unwrap_or(ExecStatus::Running),
+            parent_run_id: None,
+            parent_seq: None,
         }))
     }
 
@@ -284,7 +286,7 @@ mod tests {
             .await
             .unwrap();
 
-        let commit = TurnCommit {
+   let commit = TurnCommit {
             events: vec![Event::ActivityScheduled {
                 seq: 0,
                 activity_type: "Add".into(),
@@ -298,6 +300,8 @@ mod tests {
                 next_run_at: 0,
             }],
             new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -324,13 +328,15 @@ mod tests {
             .await
             .unwrap();
 
-        let commit = TurnCommit {
+      let commit = TurnCommit {
             events: vec![Event::SignalReceived {
                 name: "approve".into(),
                 payload: b"true".to_vec(),
             }],
             new_tasks: vec![],
             new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -370,6 +376,8 @@ mod tests {
             events: vec![],
             new_tasks: vec![],
             new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -415,10 +423,12 @@ mod tests {
             .await
             .unwrap();
         // Mark the run completed.
-        let done = TurnCommit {
+    let done = TurnCommit {
             events: vec![],
             new_tasks: vec![],
             new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Completed,
             result: Some(b"\"done\"".to_vec()),
         };

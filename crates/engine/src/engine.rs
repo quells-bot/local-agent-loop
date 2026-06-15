@@ -6,7 +6,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 
-use crate::{ExecStatus, History, NewActivityTask, NewTimer, SignalOutcome, TaskQueue, TurnCommit};
+use crate::{
+    ExecStatus, History, NewActivityTask, NewChild, NewTimer, ParentNotify, SignalOutcome,
+    TaskQueue, TurnCommit,
+};
 
 /// Options for starting a workflow (spec §7.1). `id` is the dedup key.
 #[derive(Default)]
@@ -225,6 +228,8 @@ impl Engine {
                 events: Vec::new(),
                 new_tasks: Vec::new(),
                 new_timers: Vec::new(),
+                new_children: Vec::new(),
+                parent_notify: None,
                 status: meta.status,
                 result,
             };
@@ -244,12 +249,25 @@ impl Engine {
             })
             .collect();
 
+        // A child run records its parent's identity so `ctx.info().parent` is correct
+        // (spec §9). The parent's workflow_id comes from its own execution row.
+        let parent = match &meta.parent_run_id {
+            Some(prid) => self
+                .history
+                .load_run(prid)
+                .await?
+                .map(|pm| workflow::Execution {
+                    workflow_id: pm.workflow_id,
+                    run_id: prid.clone(),
+                }),
+            None => None,
+        };
         let info = workflow::Info {
             execution: workflow::Execution {
                 workflow_id: meta.workflow_id.clone(),
                 run_id: run_id.clone(),
             },
-            parent: None,
+            parent,
             workflow_type: meta.workflow_type.clone(),
         };
         let replay = match self.workflows.get(&meta.workflow_type) {
@@ -282,6 +300,7 @@ impl Engine {
         let mut new_events = Vec::new();
         let mut new_tasks = Vec::new();
         let mut new_timers = Vec::new();
+        let mut new_children = Vec::new();
         for cmd in &outcome.commands {
             match cmd {
                 workflow::Command::ScheduleActivity {
@@ -322,7 +341,7 @@ impl Engine {
                         fire_at: now_ms() + *duration_ms as i64,
                     });
                 }
-                workflow::Command::StartChild {
+  workflow::Command::StartChild {
                     seq,
                     workflow_type,
                     input,
@@ -335,20 +354,49 @@ impl Engine {
                         workflow_type: workflow_type.clone(),
                         input: input.clone(),
                     });
+                    new_children.push(NewChild {
+                        seq: *seq as i64,
+                        child_run_id: uuid::Uuid::new_v4().to_string(),
+                        child_workflow_id: format!("{}::child::{}", meta.workflow_id, seq),
+                        workflow_type: workflow_type.clone(),
+                        input: input.clone(),
+                    });
                 }
             }
         }
 
-        let (status, result) = match &outcome.completion {
+ let (status, result) = match &outcome.completion {
             Some(Ok(bytes)) => (ExecStatus::Completed, Some(bytes.clone())),
             Some(Err(err)) => (ExecStatus::Failed, Some(serde_json::to_vec(err)?)),
             None => (ExecStatus::Running, None),
+        };
+
+        // If this run is a child and just reached a terminal status, notify the parent
+        // in the same transaction (spec §5.4) so completion+notification is atomic.
+        let parent_notify = match (&meta.parent_run_id, &meta.parent_seq, &outcome.completion) {
+            (Some(prid), Some(pseq), Some(Ok(bytes))) => Some(ParentNotify {
+                parent_run_id: prid.clone(),
+                event: workflow::Event::ChildCompleted {
+                    seq: *pseq as u64,
+                    result: workflow::ChildResult::Completed(bytes.clone()),
+                },
+            }),
+            (Some(prid), Some(pseq), Some(Err(err))) => Some(ParentNotify {
+                parent_run_id: prid.clone(),
+                event: workflow::Event::ChildCompleted {
+                    seq: *pseq as u64,
+                    result: workflow::ChildResult::Failed(err.clone()),
+                },
+            }),
+            _ => None,
         };
 
         let commit = TurnCommit {
             events: new_events,
             new_tasks,
             new_timers,
+            new_children,
+            parent_notify,
             status,
             result: result.clone(),
         };
@@ -381,10 +429,12 @@ impl Engine {
     ) -> anyhow::Result<bool> {
         let err = workflow::Error::new(message);
         let result = Some(serde_json::to_vec(&err)?);
-        let commit = TurnCommit {
+   let commit = TurnCommit {
             events: Vec::new(),
             new_tasks: Vec::new(),
             new_timers: Vec::new(),
+            new_children: Vec::new(),
+            parent_notify: None,
             status: ExecStatus::Failed,
             result: result.clone(),
         };

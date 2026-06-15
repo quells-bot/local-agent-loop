@@ -211,7 +211,7 @@ mod tests {
         db.create_execution("run-1", "wf-A", "T", b"in")
             .await
             .unwrap();
-        let commit = TurnCommit {
+     let commit = TurnCommit {
             events: vec![Event::ActivityScheduled {
                 seq: 0,
                 activity_type: "Add".into(),
@@ -225,6 +225,8 @@ mod tests {
                 next_run_at: 0,
             }],
             new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -331,7 +333,7 @@ mod tests {
             .await
             .unwrap();
         let policy = RetryPolicy::exponential(5);
-        let commit = TurnCommit {
+       let commit = TurnCommit {
             events: vec![Event::ActivityScheduled {
                 seq: 0,
                 activity_type: "Add".into(),
@@ -345,6 +347,8 @@ mod tests {
                 next_run_at: 0,
             }],
             new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -364,7 +368,7 @@ mod tests {
             .await
             .unwrap();
         let future = now_ms() + 60_000; // due in a minute
-        let commit = TurnCommit {
+      let commit = TurnCommit {
             events: vec![Event::ActivityScheduled {
                 seq: 0,
                 activity_type: "Add".into(),
@@ -378,6 +382,8 @@ mod tests {
                 next_run_at: future,
             }],
             new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -396,13 +402,15 @@ mod tests {
             .unwrap();
 
         // Commit a TimerStarted event + a timer row already due (fire_at = 0).
-        let commit = TurnCommit {
+       let commit = TurnCommit {
             events: vec![Event::TimerStarted {
                 seq: 0,
                 duration_ms: 500,
             }],
             new_tasks: vec![],
             new_timers: vec![engine::NewTimer { seq: 0, fire_at: 0 }],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
@@ -433,7 +441,7 @@ mod tests {
         db.create_execution("run-1", "wf-A", "T", b"in")
             .await
             .unwrap();
-        let commit = TurnCommit {
+  let commit = TurnCommit {
             events: vec![Event::TimerStarted {
                 seq: 0,
                 duration_ms: 60_000,
@@ -443,6 +451,8 @@ mod tests {
                 seq: 0,
                 fire_at: now_ms() + 60_000,
             }],
+            new_children: vec![],
+            parent_notify: None,
             status: ExecStatus::Running,
             result: None,
         };
