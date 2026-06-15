@@ -15,8 +15,11 @@
 //!   and bare `FuturesUnordered` (reorders by wakeup/wall-clock order). Using either
 //!   breaks replay.
 //!
-//! These bans are a documented contract today; a `#[workflow]` macro / clippy lint
-//! (the `workflow-macros` crate) is deferred to Pass 5.
+//! These bans are a documented contract enforced at runtime by the replay divergence
+//! check (spec §12, Invariant 9; hardened in Pass 5a). A compile-time `#[workflow]`
+//! macro / clippy lint (the `workflow-macros` crate) is deferred indefinitely — Rust
+//! cannot enforce combinator choice at the type level, and the runtime check plus the
+//! documented contract cover the desktop posture.
 
 pub use activity::Execution; // re-export so workflow::Execution exists (spec §9)
 

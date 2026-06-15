@@ -3,6 +3,13 @@ use crate::{
 };
 use workflow::CommandResult;
 
+/// # Migration seam (spec §15)
+///
+/// `History` and `TaskQueue` are the *complete* boundary between the backend-agnostic
+/// engine and a concrete store. `persist::Sqlite` implements exactly these two and
+/// nothing else; a cloud backend is "implement these two traits" rather than a
+/// rewrite. `crates/engine/tests/migration_seam.rs` asserts this at compile time.
+///
 /// History store + atomic decision-turn commit (spec §15).
 #[async_trait::async_trait]
 pub trait History: Send + Sync {
