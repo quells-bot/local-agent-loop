@@ -321,6 +321,20 @@ impl Engine {
                         fire_at: now_ms() + *duration_ms as i64,
                     });
                 }
+                workflow::Command::StartChild {
+                    seq,
+                    workflow_type,
+                    input,
+                } => {
+                    if recorded.contains(seq) {
+                        continue;
+                    }
+                    new_events.push(workflow::Event::ChildScheduled {
+                        seq: *seq,
+                        workflow_type: workflow_type.clone(),
+                        input: input.clone(),
+                    });
+                }
             }
         }
 

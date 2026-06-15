@@ -35,6 +35,20 @@ pub enum Event {
         name: String,
         payload: Vec<u8>,
     },
+    /// Parent-side echo that a child workflow was started (spec §5.4). The analog of
+    /// `ActivityScheduled` / `TimerStarted`: it carries the command's `seq` for the
+    /// divergence check and tells replay this child is already in flight.
+    ChildScheduled {
+        seq: u64,
+        workflow_type: String,
+        input: Vec<u8>,
+    },
+    /// A child workflow reached a terminal status; written into the PARENT's history
+    /// (spec §5.4). `seq` is the parent's `StartChild` command seq.
+    ChildCompleted {
+        seq: u64,
+        result: crate::result::ChildResult,
+    },
 }
 
 impl Event {
@@ -48,6 +62,8 @@ impl Event {
             Event::TimerStarted { .. } => "TimerStarted",
             Event::TimerFired { .. } => "TimerFired",
             Event::SignalReceived { .. } => "SignalReceived",
+            Event::ChildScheduled { .. } => "ChildScheduled",
+            Event::ChildCompleted { .. } => "ChildCompleted",
         }
     }
 }
@@ -105,6 +121,23 @@ mod tests {
             .kind(),
             "SignalReceived"
         );
+        assert_eq!(
+            Event::ChildScheduled {
+                seq: 0,
+                workflow_type: "Ship".into(),
+                input: vec![],
+            }
+            .kind(),
+            "ChildScheduled"
+        );
+        assert_eq!(
+            Event::ChildCompleted {
+                seq: 0,
+                result: crate::result::ChildResult::Completed(vec![]),
+            }
+            .kind(),
+            "ChildCompleted"
+        );
     }
 
     #[test]
@@ -125,6 +158,24 @@ mod tests {
         };
         let back: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(e, back);
+    }
+
+    #[test]
+    fn child_events_round_trip_through_json() {
+        let s = Event::ChildScheduled {
+            seq: 2,
+            workflow_type: "Ship".into(),
+            input: b"[1]".to_vec(),
+        };
+        let back: Event = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(s, back);
+
+        let c = Event::ChildCompleted {
+            seq: 2,
+            result: crate::result::ChildResult::Failed(crate::Error::new("nope")),
+        };
+        let back: Event = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(c, back);
     }
 
     #[test]

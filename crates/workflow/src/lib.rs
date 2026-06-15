@@ -33,7 +33,7 @@ mod event;
 pub use event::Event;
 
 mod result;
-pub use result::CommandResult;
+pub use result::{ChildResult, CommandResult};
 
 mod error;
 pub use error::Error;

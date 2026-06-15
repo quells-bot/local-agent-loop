@@ -88,6 +88,12 @@ pub fn cold_replay<W: crate::Definition>(
             Event::SignalReceived { name, payload } => {
                 applied.push(Applied::Signal(name.clone(), payload.clone()));
             }
+            Event::ChildScheduled { .. } => {
+                // Child divergence checked via seq matching; handled in later task.
+            }
+            Event::ChildCompleted { .. } => {
+                // Child outcome delivery mapped to parent result channels in later task.
+            }
         }
     }
 
@@ -127,6 +133,9 @@ pub fn cold_replay<W: crate::Definition>(
                             });
                         }
                     }
+                }
+                Command::StartChild { .. } => {
+                    // Child workflow divergence checked via ChildScheduled events (spec §5.4).
                 }
             }
             commands.push(cmd);
