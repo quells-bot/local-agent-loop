@@ -31,7 +31,10 @@ mod tests {
     #[tokio::test]
     async fn sample_activity_runs() {
         let ctx = Context::new(Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             activity_id: "1".into(),
             activity_type: Add::TYPE.into(),
             attempt: 1,

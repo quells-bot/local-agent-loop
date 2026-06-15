@@ -77,7 +77,7 @@ async fn cold_recovery_completes_identically() {
             .unwrap();
         assert!(engine.process_one_runnable().await.unwrap()); // schedules Add #0
         assert!(engine.process_one_activity().await.unwrap()); // completes Add #0
-        // engine dropped here; only the shared `db` connection survives
+                                                               // engine dropped here; only the shared `db` connection survives
     }
 
     // Phase 2: a fresh engine with NO in-memory state cold-replays and finishes.
@@ -107,14 +107,23 @@ async fn completion_observer_fires_on_terminal() {
         .await
         .unwrap();
     pump(&engine).await.unwrap();
-    assert!(fired.load(Ordering::SeqCst), "observer should fire on completion");
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "observer should fire on completion"
+    );
 }
 
 #[tokio::test]
 async fn start_is_idempotent_by_id() {
     let db = Sqlite::open_in_memory().unwrap();
     let engine = build(&db);
-    let h1 = engine.start_workflow::<Sum>((), StartOptions { id: "dup".into() }).await.unwrap();
-    let h2 = engine.start_workflow::<Sum>((), StartOptions { id: "dup".into() }).await.unwrap();
+    let h1 = engine
+        .start_workflow::<Sum>((), StartOptions { id: "dup".into() })
+        .await
+        .unwrap();
+    let h2 = engine
+        .start_workflow::<Sum>((), StartOptions { id: "dup".into() })
+        .await
+        .unwrap();
     assert_eq!(h1.run_id(), h2.run_id(), "same id returns the existing run");
 }

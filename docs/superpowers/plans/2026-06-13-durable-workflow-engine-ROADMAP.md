@@ -20,9 +20,11 @@ independently-testable chunks.
 
 The spec is long. A single monolithic plan would be hard to keep correct. Instead
 the work follows the spec's five **passes**, and each pass subdivides into
-**chunks** that each produce working, tested software. Roughly 11 chunks total,
+**chunks** that each produce working, tested software. Roughly 12 chunks total,
 each small-to-medium. Signals land in Pass 3 (the earliest non-artificial slot,
-spec §13).
+spec §13). Chunk **2c** is robustness hardening folded out of the Pass 1 review
+(lease-expiry, dead-lettering) — the concurrency/timer machinery from 2a/2b turns
+those latent gaps into real bugs, so they are fixed before Pass 3 builds on top.
 
 ---
 
@@ -117,7 +119,8 @@ pub struct RetryPolicy { pub max_attempts: u32, pub initial_ms: u64, pub multipl
 
 pub enum Command {                      // emitted by futures, drained by driver
     ScheduleActivity { seq: u64, activity_type: String, input: Vec<u8>, retry: RetryPolicy },
-    // Pass 2 adds StartTimer; Pass 4 adds StartChild; Pass 3 adds nothing (signals are inbound)
+    StartTimer { seq: u64, duration_ms: u64 },   // 2a (done)
+    // Pass 4 adds StartChild; Pass 3 adds nothing (signals are inbound)
 }                                       // derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize
 
 pub enum Event {                        // history record, applied into ctx + persisted
@@ -125,7 +128,9 @@ pub enum Event {                        // history record, applied into ctx + pe
     ActivityScheduled { seq: u64, activity_type: String, input: Vec<u8>, retry: RetryPolicy },
     ActivityCompleted { seq: u64, output: Vec<u8> },
     ActivityFailed    { seq: u64, error: activity::Error },
-    // Pass 2: TimerFired; Pass 3: SignalReceived; Pass 4: ChildCompleted;
+    TimerStarted      { seq: u64, duration_ms: u64 },   // 2a (done)
+    TimerFired        { seq: u64 },                      // 2a (done)
+    // Pass 3: SignalReceived; Pass 4: ChildCompleted;
     // reserved: WorkflowCancelRequested
 }                                       // derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize
                                         // method: kind(&self) -> &'static str
@@ -138,6 +143,10 @@ pub struct Error { pub message: String }      // workflow failure
 
 pub struct Context { /* Rc<ContextInner>; minimal in 1a, replay state added in 1b */ }
 //   info() -> &Info  (1a);  activity::<A>(input) -> ActivityFuture, now(), random() (1b)
+//   timer/sleep(dur) -> TimerFuture (2a);  spawn(fut) -> SpawnHandle<T> (2b, workflow.Go analog)
+
+pub struct SpawnHandle<T> { /* Rc<RefCell<Option<T>>>; resolves to T when the branch completes */ }  // 2b
+// WorkflowState drives main + spawned branches to quiescence per turn (ordered scheduler, §4.4).  // 2b
 
 // `?Send`: workflow futures hold Rc/RefCell (single-threaded loop), so they are
 // NOT Send. Associated types are `'static` (not Send — values never cross threads).
@@ -154,7 +163,9 @@ pub struct Context { /* Rc<ContextInner>; minimal in 1a, replay state added in 1
 ```rust
 pub struct StoredEvent { pub event_id: i64, pub event: workflow::Event }
 pub struct TurnCommit { pub events: Vec<Event>, pub new_tasks: Vec<NewActivityTask>,
+                        pub new_timers: Vec<NewTimer>,    // 2a (done)
                         pub status: ExecStatus, pub result: Option<Vec<u8>> }
+pub struct NewTimer { pub seq: i64, pub fire_at: i64 }    // 2a (done)
 
 #[async_trait] pub trait History {
     async fn create_execution(&self, candidate_run_id: &str, workflow_id: &str,
@@ -170,6 +181,8 @@ pub struct TurnCommit { pub events: Vec<Event>, pub new_tasks: Vec<NewActivityTa
     async fn lease_activity(&self) -> Result<Option<ActivityLease>>;
     async fn complete_activity(&self, lease: &ActivityLease, result: CommandResult) -> Result<()>;
     async fn reschedule_activity(&self, lease: &ActivityLease, next_run_at: i64) -> Result<()>;
+    async fn fire_due_timer(&self) -> Result<bool>;   // 2a (done)
+    async fn reclaim_expired_activities(&self) -> Result<u64>;   // 2c (done)
 }
 pub enum SignalError { WorkflowNotFound, NotRunning }   // Pass 3
 ```
@@ -177,6 +190,10 @@ pub enum SignalError { WorkflowNotFound, NotRunning }   // Pass 3
 (`anyhow::Result` elided as `Result` above. Supporting types — `ExecStatus`,
 `NewActivityTask`, `ActivityLease`, `CreateOutcome`, `RunMeta` — are defined in
 chunk **1c**.)
+
+2c (done) also added the `activity_tasks.lease_expires_at INTEGER` column (NULL
+when pending; epoch-ms deadline when leased), which `reclaim_expired_activities`
+sweeps to requeue tasks whose lease has expired.
 
 ---
 
@@ -188,8 +205,9 @@ chunk **1c**.)
 | 1b | Replay core (pure) | §3, §4, §12 | `archive/2026-06-13-pass-1b-replay-core.md` | done |
 | 1c | Backend traits + SQLite persist | §5, §11, §15 | `archive/2026-06-13-pass-1c-persist-and-traits.md` | done |
 | 1d | Driver + workers + start + observer | §5, §6.1(start), §7, §8 | `archive/2026-06-13-pass-1d-driver-and-workers.md` | done |
-| 2a | Timers (`sleep`/`timer` + service) | §4, §5.3 | _(JIT)_ | not yet authored |
-| 2b | Combinators + spawn scheduler | §4.2, §4.4 | _(JIT)_ | not yet authored |
+| 2a | Timers (`sleep`/`timer` + service) | §4, §5.3 | `2026-06-14-pass-2a-timers.md` | done |
+| 2b | Combinators + spawn scheduler | §4.2, §4.4 | `2026-06-14-pass-2b-combinators-and-spawn.md` | done |
+| 2c | Robustness hardening (lease-expiry + dead-letter) | §5.1, §5.2, §14 | `2026-06-14-pass-2c-hardening.md` | done |
 | 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | _(JIT)_ | not yet authored |
 | 3b | `signal_workflow` + signal-or-timeout e2e | §6.1, §7.2 | _(JIT)_ | not yet authored |
 | 4a | Child workflows | §5.4, §9(info.parent) | _(JIT)_ | not yet authored |

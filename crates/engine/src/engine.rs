@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 
-use crate::{ExecStatus, History, NewActivityTask, TaskQueue, TurnCommit};
+use crate::{ExecStatus, History, NewActivityTask, NewTimer, TaskQueue, TurnCommit};
 
 /// Options for starting a workflow (spec §7.1). `id` is the dedup key.
 #[derive(Default)]
@@ -24,12 +24,18 @@ pub struct RunCompleted {
 }
 
 type ReplayFn = Arc<
-    dyn Fn(workflow::Info, &[workflow::Event]) -> Result<workflow::ReplayOutcome, workflow::Nondeterminism>
+    dyn Fn(
+            workflow::Info,
+            &[workflow::Event],
+        ) -> Result<workflow::ReplayOutcome, workflow::Nondeterminism>
         + Send
         + Sync,
 >;
 type RunnerFn = Arc<
-    dyn Fn(activity::Context, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, activity::Error>> + Send>>
+    dyn Fn(
+            activity::Context,
+            Vec<u8>,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, activity::Error>> + Send>>
         + Send
         + Sync,
 >;
@@ -44,12 +50,21 @@ pub struct Engine {
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
 }
 
 impl Engine {
     pub fn new(history: Arc<dyn History>, queue: Arc<dyn TaskQueue>) -> Self {
-        Self { history, queue, workflows: HashMap::new(), activities: HashMap::new(), observer: None }
+        Self {
+            history,
+            queue,
+            workflows: HashMap::new(),
+            activities: HashMap::new(),
+            observer: None,
+        }
     }
 
     pub fn register_workflow<W: workflow::Definition>(&mut self) {
@@ -64,11 +79,13 @@ impl Engine {
             A::TYPE.to_string(),
             Arc::new(|ctx, bytes| {
                 Box::pin(async move {
-                    let input: A::Input = serde_json::from_slice(&bytes)
-                        .map_err(|e| activity::Error::fatal(format!("activity input deserialize: {e}")))?;
+                    let input: A::Input = serde_json::from_slice(&bytes).map_err(|e| {
+                        activity::Error::fatal(format!("activity input deserialize: {e}"))
+                    })?;
                     let out = A::run(ctx, input).await?;
-                    serde_json::to_vec(&out)
-                        .map_err(|e| activity::Error::fatal(format!("activity output serialize: {e}")))
+                    serde_json::to_vec(&out).map_err(|e| {
+                        activity::Error::fatal(format!("activity output serialize: {e}"))
+                    })
                 })
             }),
         );
@@ -100,7 +117,9 @@ impl Handle {
                 }
                 Some((_, ExecStatus::Completed, None)) => anyhow::bail!("completed without result"),
                 Some((_, ExecStatus::Failed, _)) => anyhow::bail!("workflow failed"),
-                Some((_, ExecStatus::Running, _)) => tokio::time::sleep(Duration::from_millis(5)).await,
+                Some((_, ExecStatus::Running, _)) => {
+                    tokio::time::sleep(Duration::from_millis(5)).await
+                }
                 None => anyhow::bail!("no execution for workflow id {}", self.workflow_id),
             }
         }
@@ -120,7 +139,11 @@ impl Engine {
             .history
             .create_execution(&candidate, &opts.id, W::TYPE, &input_bytes)
             .await?;
-        Ok(Handle { run_id, workflow_id: opts.id, history: self.history.clone() })
+        Ok(Handle {
+            run_id,
+            workflow_id: opts.id,
+            history: self.history.clone(),
+        })
     }
 }
 
@@ -140,12 +163,34 @@ impl Engine {
             .await?
             .ok_or_else(|| anyhow::anyhow!("runnable run {run_id} has no execution row"))?;
 
+        if meta.status != ExecStatus::Running {
+            // Already terminal: a late completion re-marked it runnable. Preserve the
+            // stored result and only clear the stale runnable flag — prevents the
+            // observer double-firing (spec §7.3); the Inv 5 commit boundary still holds.
+            let existing = self
+                .history
+                .find_execution(&meta.workflow_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("terminal run {run_id} has no execution row"))?;
+            let result = existing.2;
+            let commit = TurnCommit {
+                events: Vec::new(),
+                new_tasks: Vec::new(),
+                new_timers: Vec::new(),
+                status: meta.status,
+                result,
+            };
+            self.history.commit_turn(&run_id, &commit).await?;
+            return Ok(true);
+        }
+
         let stored = self.history.read_history(&run_id).await?;
         let events: Vec<workflow::Event> = stored.into_iter().map(|s| s.event).collect();
         let recorded: HashSet<u64> = events
             .iter()
             .filter_map(|e| match e {
-                workflow::Event::ActivityScheduled { seq, .. } => Some(*seq),
+                workflow::Event::ActivityScheduled { seq, .. }
+                | workflow::Event::TimerStarted { seq, .. } => Some(*seq),
                 _ => None,
             })
             .collect();
@@ -158,35 +203,77 @@ impl Engine {
             parent: None,
             workflow_type: meta.workflow_type.clone(),
         };
-        let replay = self
-            .workflows
-            .get(&meta.workflow_type)
-            .ok_or_else(|| anyhow::anyhow!("unregistered workflow {}", meta.workflow_type))?
-            .clone();
+        let replay = match self.workflows.get(&meta.workflow_type) {
+            Some(r) => r.clone(),
+            None => {
+                return self
+                    .dead_letter(
+                        &run_id,
+                        &meta.workflow_id,
+                        format!("unregistered workflow {}", meta.workflow_type),
+                    )
+                    .await;
+            }
+        };
 
-        let outcome = replay(info, &events)
-            .map_err(|e| anyhow::anyhow!("nondeterminism in {}: {e}", meta.workflow_type))?;
+        let outcome = match replay(info, &events) {
+            Ok(o) => o,
+            Err(e) => {
+                return self
+                    .dead_letter(
+                        &run_id,
+                        &meta.workflow_id,
+                        format!("nondeterminism in {}: {e}", meta.workflow_type),
+                    )
+                    .await;
+            }
+        };
 
         // Persist only commands not already recorded in history.
         let mut new_events = Vec::new();
         let mut new_tasks = Vec::new();
+        let mut new_timers = Vec::new();
         for cmd in &outcome.commands {
-            let workflow::Command::ScheduleActivity { seq, activity_type, input, retry } = cmd;
-            if recorded.contains(seq) {
-                continue;
+            match cmd {
+                workflow::Command::ScheduleActivity {
+                    seq,
+                    activity_type,
+                    input,
+                    retry,
+                } => {
+                    if recorded.contains(seq) {
+                        continue;
+                    }
+                    new_events.push(workflow::Event::ActivityScheduled {
+                        seq: *seq,
+                        activity_type: activity_type.clone(),
+                        input: input.clone(),
+                        retry: retry.clone(),
+                    });
+                    new_tasks.push(NewActivityTask {
+                        seq: *seq as i64,
+                        activity_type: activity_type.clone(),
+                        input: input.clone(),
+                        next_run_at: 0,
+                    });
+                }
+                workflow::Command::StartTimer { seq, duration_ms } => {
+                    if recorded.contains(seq) {
+                        continue;
+                    }
+                    new_events.push(workflow::Event::TimerStarted {
+                        seq: *seq,
+                        duration_ms: *duration_ms,
+                    });
+                    // `fire_at` is wall-clock and deliberately NOT replayed: the
+                    // duration is the deterministic, divergence-checked datum, and
+                    // this absolute deadline must never feed back into replay (§5.3).
+                    new_timers.push(NewTimer {
+                        seq: *seq as i64,
+                        fire_at: now_ms() + *duration_ms as i64,
+                    });
+                }
             }
-            new_events.push(workflow::Event::ActivityScheduled {
-                seq: *seq,
-                activity_type: activity_type.clone(),
-                input: input.clone(),
-                retry: retry.clone(),
-            });
-            new_tasks.push(NewActivityTask {
-                seq: *seq as i64,
-                activity_type: activity_type.clone(),
-                input: input.clone(),
-                next_run_at: 0,
-            });
         }
 
         let (status, result) = match &outcome.completion {
@@ -195,7 +282,13 @@ impl Engine {
             None => (ExecStatus::Running, None),
         };
 
-        let commit = TurnCommit { events: new_events, new_tasks, status, result: result.clone() };
+        let commit = TurnCommit {
+            events: new_events,
+            new_tasks,
+            new_timers,
+            status,
+            result: result.clone(),
+        };
         self.history.commit_turn(&run_id, &commit).await?;
 
         if status != ExecStatus::Running {
@@ -207,6 +300,39 @@ impl Engine {
                     result,
                 });
             }
+        }
+        Ok(true)
+    }
+}
+
+impl Engine {
+    /// Terminally fail a run that cannot make progress (unregistered type, replay
+    /// divergence). Commits a `Failed` turn — which clears `runnable`, so the driver
+    /// stops retrying — and fires the completion observer (spec §5.1, §14). Returns
+    /// `Ok(true)` so the caller's loop continues without the error backoff.
+    async fn dead_letter(
+        &self,
+        run_id: &str,
+        workflow_id: &str,
+        message: String,
+    ) -> anyhow::Result<bool> {
+        let err = workflow::Error::new(message);
+        let result = Some(serde_json::to_vec(&err)?);
+        let commit = TurnCommit {
+            events: Vec::new(),
+            new_tasks: Vec::new(),
+            new_timers: Vec::new(),
+            status: ExecStatus::Failed,
+            result: result.clone(),
+        };
+        self.history.commit_turn(run_id, &commit).await?;
+        if let Some(obs) = &self.observer {
+            obs(RunCompleted {
+                run_id: run_id.to_string(),
+                workflow_id: workflow_id.to_string(),
+                status: ExecStatus::Failed,
+                result,
+            });
         }
         Ok(true)
     }
@@ -261,11 +387,27 @@ impl Engine {
                         .await?;
                 } else {
                     let delay = lease.retry.backoff_ms(lease.attempt + 1) as i64;
-                    self.queue.reschedule_activity(&lease, now_ms() + delay).await?;
+                    self.queue
+                        .reschedule_activity(&lease, now_ms() + delay)
+                        .await?;
                 }
             }
         }
         Ok(true)
+    }
+}
+
+impl Engine {
+    /// Fire one due timer, if any (spec §5.3). Returns false if none was due.
+    pub async fn process_one_timer(&self) -> anyhow::Result<bool> {
+        self.queue.fire_due_timer().await
+    }
+}
+
+impl Engine {
+    /// Reclaim expired in-flight activity leases (spec §5.2). Returns the count.
+    pub async fn reclaim_expired_activities(&self) -> anyhow::Result<u64> {
+        self.queue.reclaim_expired_activities().await
     }
 }
 
@@ -301,6 +443,30 @@ impl Engine {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                 }
+            }
+        });
+
+        let timers = engine.clone();
+        tokio::spawn(async move {
+            loop {
+                match timers.process_one_timer().await {
+                    Ok(true) => {}
+                    Ok(false) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Err(err) => {
+                        eprintln!("timer error: {err:#}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        });
+
+        let sweeper = engine.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(err) = sweeper.reclaim_expired_activities().await {
+                    eprintln!("lease sweep error: {err:#}");
+                }
+                tokio::time::sleep(Duration::from_secs(15)).await;
             }
         });
 

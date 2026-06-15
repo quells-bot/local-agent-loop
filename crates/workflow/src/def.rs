@@ -33,7 +33,10 @@ mod tests {
     #[tokio::test]
     async fn sample_workflow_runs() {
         let ctx = Context::new(Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             parent: None,
             workflow_type: Echo::TYPE.into(),
         });

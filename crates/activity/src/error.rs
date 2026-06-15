@@ -9,10 +9,16 @@ pub struct Error {
 
 impl Error {
     pub fn retryable(message: impl Into<String>) -> Self {
-        Self { message: message.into(), non_retryable: false }
+        Self {
+            message: message.into(),
+            non_retryable: false,
+        }
     }
     pub fn fatal(message: impl Into<String>) -> Self {
-        Self { message: message.into(), non_retryable: true }
+        Self {
+            message: message.into(),
+            non_retryable: true,
+        }
     }
 }
 

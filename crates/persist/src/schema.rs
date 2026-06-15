@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS activity_tasks (
   input         BLOB,
   attempt       INTEGER NOT NULL DEFAULT 0,
   next_run_at   INTEGER NOT NULL,
+  lease_expires_at INTEGER,             -- NULL when pending; epoch-ms deadline when leased
   status        TEXT NOT NULL,
   PRIMARY KEY (run_id, seq)
 );

@@ -10,7 +10,9 @@ fn encode(event: &Event) -> (Option<i64>, &'static str, Vec<u8>) {
     let seq = match event {
         Event::ActivityScheduled { seq, .. }
         | Event::ActivityCompleted { seq, .. }
-        | Event::ActivityFailed { seq, .. } => Some(*seq as i64),
+        | Event::ActivityFailed { seq, .. }
+        | Event::TimerStarted { seq, .. }
+        | Event::TimerFired { seq } => Some(*seq as i64),
         Event::WorkflowStarted { .. } => None,
     };
     let payload = serde_json::to_vec(event).expect("event serializes");
@@ -45,7 +47,9 @@ impl History for Sqlite {
         )?;
 
         if inserted == 1 {
-            let (seq, kind, payload) = encode(&Event::WorkflowStarted { input: input.to_vec() });
+            let (seq, kind, payload) = encode(&Event::WorkflowStarted {
+                input: input.to_vec(),
+            });
             tx.execute(
                 "INSERT INTO history (run_id, event_id, seq, kind, payload, ts) \
                  VALUES (?1, 1, ?2, ?3, ?4, ?5)",
@@ -70,9 +74,8 @@ impl History for Sqlite {
 
     async fn read_history(&self, run_id: &str) -> anyhow::Result<Vec<StoredEvent>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT event_id, payload FROM history WHERE run_id = ?1 ORDER BY event_id",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT event_id, payload FROM history WHERE run_id = ?1 ORDER BY event_id")?;
         let rows = stmt.query_map(params![run_id], |r| {
             let event_id: i64 = r.get(0)?;
             let payload: Vec<u8> = r.get(1)?;
@@ -130,7 +133,20 @@ impl History for Sqlite {
                 "INSERT OR REPLACE INTO activity_tasks \
                  (run_id, seq, activity_type, input, attempt, next_run_at, status) \
                  VALUES (?1, ?2, ?3, ?4, 0, ?5, 'pending')",
-                params![run_id, task.seq, task.activity_type, task.input, task.next_run_at],
+                params![
+                    run_id,
+                    task.seq,
+                    task.activity_type,
+                    task.input,
+                    task.next_run_at
+                ],
+            )?;
+        }
+
+        for timer in &commit.new_timers {
+            tx.execute(
+                "INSERT OR REPLACE INTO timers (run_id, seq, fire_at) VALUES (?1, ?2, ?3)",
+                params![run_id, timer.seq, timer.fire_at],
             )?;
         }
 
@@ -162,7 +178,11 @@ impl History for Sqlite {
             )
             .optional()?;
         Ok(row.map(|(run_id, status, result)| {
-            (run_id, ExecStatus::from_str(&status).unwrap_or(ExecStatus::Running), result)
+            (
+                run_id,
+                ExecStatus::from_str(&status).unwrap_or(ExecStatus::Running),
+                result,
+            )
         }))
     }
 }
@@ -176,8 +196,14 @@ mod tests {
     #[tokio::test]
     async fn create_is_idempotent_by_workflow_id() {
         let db = Sqlite::open_in_memory().unwrap();
-        let (o1, r1) = db.create_execution("run-1", "wf-A", "T", b"in").await.unwrap();
-        let (o2, r2) = db.create_execution("run-2", "wf-A", "T", b"in").await.unwrap();
+        let (o1, r1) = db
+            .create_execution("run-1", "wf-A", "T", b"in")
+            .await
+            .unwrap();
+        let (o2, r2) = db
+            .create_execution("run-2", "wf-A", "T", b"in")
+            .await
+            .unwrap();
         assert_eq!(o1, CreateOutcome::Created);
         assert_eq!(o2, CreateOutcome::AlreadyExists);
         assert_eq!(r1, "run-1");
@@ -187,17 +213,26 @@ mod tests {
     #[tokio::test]
     async fn create_writes_workflow_started_and_runnable() {
         let db = Sqlite::open_in_memory().unwrap();
-        db.create_execution("run-1", "wf-A", "T", b"in").await.unwrap();
+        db.create_execution("run-1", "wf-A", "T", b"in")
+            .await
+            .unwrap();
         let h = db.read_history("run-1").await.unwrap();
         assert_eq!(h.len(), 1);
         assert!(matches!(h[0].event, Event::WorkflowStarted { .. }));
-        assert_eq!(<Sqlite as engine::TaskQueue>::next_runnable(&db).await.unwrap(), Some("run-1".into()));
+        assert_eq!(
+            <Sqlite as engine::TaskQueue>::next_runnable(&db)
+                .await
+                .unwrap(),
+            Some("run-1".into())
+        );
     }
 
     #[tokio::test]
     async fn commit_turn_appends_clears_runnable_and_sets_status() {
         let db = Sqlite::open_in_memory().unwrap();
-        db.create_execution("run-1", "wf-A", "T", b"in").await.unwrap();
+        db.create_execution("run-1", "wf-A", "T", b"in")
+            .await
+            .unwrap();
 
         let commit = TurnCommit {
             events: vec![Event::ActivityScheduled {
@@ -212,6 +247,7 @@ mod tests {
                 input: b"[1,2]".to_vec(),
                 next_run_at: 0,
             }],
+            new_timers: vec![],
             status: ExecStatus::Running,
             result: None,
         };
@@ -219,7 +255,15 @@ mod tests {
 
         let h = db.read_history("run-1").await.unwrap();
         assert_eq!(h.len(), 2);
-        assert!(matches!(h[1].event, Event::ActivityScheduled { seq: 0, .. }));
-        assert_eq!(<Sqlite as engine::TaskQueue>::next_runnable(&db).await.unwrap(), None);
+        assert!(matches!(
+            h[1].event,
+            Event::ActivityScheduled { seq: 0, .. }
+        ));
+        assert_eq!(
+            <Sqlite as engine::TaskQueue>::next_runnable(&db)
+                .await
+                .unwrap(),
+            None
+        );
     }
 }

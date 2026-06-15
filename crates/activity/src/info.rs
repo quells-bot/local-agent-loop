@@ -15,7 +15,10 @@ mod tests {
     #[test]
     fn holds_fields() {
         let i = Info {
-            execution: Execution { workflow_id: "w".into(), run_id: "r".into() },
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
             activity_id: "7".into(),
             activity_type: "Charge".into(),
             attempt: 1,

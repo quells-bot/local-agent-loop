@@ -9,11 +9,19 @@ pub struct RetryPolicy {
 
 impl RetryPolicy {
     pub fn exponential(max_attempts: u32) -> Self {
-        Self { max_attempts, initial_ms: 100, multiplier: 2 }
+        Self {
+            max_attempts,
+            initial_ms: 100,
+            multiplier: 2,
+        }
     }
 
     pub fn none() -> Self {
-        Self { max_attempts: 1, initial_ms: 0, multiplier: 1 }
+        Self {
+            max_attempts: 1,
+            initial_ms: 0,
+            multiplier: 1,
+        }
     }
 
     /// Delay before the given 1-based attempt. Attempt 1 (first try) has no delay.
@@ -34,10 +42,10 @@ mod tests {
     #[test]
     fn exponential_backoff_schedule() {
         let p = RetryPolicy::exponential(5);
-        assert_eq!(p.backoff_ms(1), 0);    // first attempt: immediate
-        assert_eq!(p.backoff_ms(2), 100);  // initial
-        assert_eq!(p.backoff_ms(3), 200);  // *2
-        assert_eq!(p.backoff_ms(4), 400);  // *2
+        assert_eq!(p.backoff_ms(1), 0); // first attempt: immediate
+        assert_eq!(p.backoff_ms(2), 100); // initial
+        assert_eq!(p.backoff_ms(3), 200); // *2
+        assert_eq!(p.backoff_ms(4), 400); // *2
     }
 
     #[test]

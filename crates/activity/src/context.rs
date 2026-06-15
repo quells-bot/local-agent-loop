@@ -27,7 +27,10 @@ mod tests {
 
     fn ctx() -> Context {
         Context::new(Info {
-            execution: Execution { workflow_id: "order-1".into(), run_id: "run-9".into() },
+            execution: Execution {
+                workflow_id: "order-1".into(),
+                run_id: "run-9".into(),
+            },
             activity_id: "3".into(),
             activity_type: "Charge".into(),
             attempt: 2,
