@@ -81,6 +81,7 @@ dependencies = [
  "persist",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "uuid",
  "workflow",

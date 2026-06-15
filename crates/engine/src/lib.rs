@@ -6,4 +6,4 @@ mod traits;
 pub use traits::{History, TaskQueue};
 
 mod engine;
-pub use engine::{Engine, Handle, RunCompleted, StartOptions};
+pub use engine::{Engine, Handle, RunCompleted, SignalError, StartOptions};

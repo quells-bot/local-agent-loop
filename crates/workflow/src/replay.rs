@@ -51,6 +51,7 @@ pub fn cold_replay<W: crate::Definition>(
     enum Applied {
         Result(u64, CommandResult),
         Timer(u64),
+        Signal(String, Vec<u8>),
     }
     let mut recorded_sched: HashMap<u64, (String, Vec<u8>)> = HashMap::new();
     let mut recorded_timer: HashMap<u64, u64> = HashMap::new(); // seq -> duration_ms
@@ -84,6 +85,9 @@ pub fn cold_replay<W: crate::Definition>(
                 applied.push(Applied::Timer(*seq));
             }
             Event::WorkflowStarted { .. } => {}
+            Event::SignalReceived { name, payload } => {
+                applied.push(Applied::Signal(name.clone(), payload.clone()));
+            }
         }
     }
 
@@ -139,6 +143,9 @@ pub fn cold_replay<W: crate::Definition>(
                     match &applied[cursor] {
                         Applied::Result(seq, r) => state.apply_result(*seq, r.clone()),
                         Applied::Timer(seq) => state.apply_timer_fired(*seq),
+                        Applied::Signal(name, payload) => {
+                            state.apply_signal(name.clone(), payload.clone())
+                        }
                     }
                     cursor += 1;
                 } else {
@@ -568,5 +575,191 @@ mod tests {
             "va=2 (A=1+1), vb=4 (B=2+2) -> 2*10+4 even though B resolved first"
         );
         assert_eq!(outcome.commands.len(), 2);
+    }
+
+    // --- Pass 3a: signals -------------------------------------------------
+
+    // Workflow that blocks on a single signal, returning its bool payload.
+    struct WaitApprove;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for WaitApprove {
+        type Input = ();
+        type Output = bool;
+        const TYPE: &'static str = "WaitApprove";
+        async fn run(ctx: Context, _i: ()) -> Result<bool, Error> {
+            let approvals = ctx.signal_channel::<bool>("approve");
+            let v = approvals.recv().await?;
+            Ok(v)
+        }
+    }
+
+    fn wait_info() -> Info {
+        Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            parent: None,
+            workflow_type: "WaitApprove".into(),
+        }
+    }
+
+    #[test]
+    fn replays_signal_received() {
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::SignalReceived {
+                name: "approve".into(),
+                payload: serde_json::to_vec(&true).unwrap(),
+            },
+        ];
+        let outcome = cold_replay::<WaitApprove>(wait_info(), &h).unwrap();
+        let out: bool = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert!(out);
+        assert!(
+            outcome.commands.is_empty(),
+            "signals are inbound: they allocate no command and no seq"
+        );
+    }
+
+    #[test]
+    fn signal_for_other_name_leaves_recv_pending() {
+        // A signal for a DIFFERENT name must not resolve the "approve" recv.
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::SignalReceived {
+                name: "other".into(),
+                payload: serde_json::to_vec(&true).unwrap(),
+            },
+        ];
+        let outcome = cold_replay::<WaitApprove>(wait_info(), &h).unwrap();
+        assert!(
+            outcome.completion.is_none(),
+            "a signal for a different name does not wake recv()"
+        );
+    }
+
+    // Workflow that receives TWO signals of the same name, in order.
+    struct TwoRecv;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for TwoRecv {
+        type Input = ();
+        type Output = (i64, i64);
+        const TYPE: &'static str = "TwoRecv";
+        async fn run(ctx: Context, _i: ()) -> Result<(i64, i64), Error> {
+            let ch = ctx.signal_channel::<i64>("n");
+            let a = ch.recv().await?;
+            let b = ch.recv().await?;
+            Ok((a, b))
+        }
+    }
+
+    #[test]
+    fn two_signals_resolve_in_order_one_per_turn() {
+        let info = Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            parent: None,
+            workflow_type: "TwoRecv".into(),
+        };
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::SignalReceived {
+                name: "n".into(),
+                payload: serde_json::to_vec(&1i64).unwrap(),
+            },
+            Event::SignalReceived {
+                name: "n".into(),
+                payload: serde_json::to_vec(&2i64).unwrap(),
+            },
+        ];
+        let outcome = cold_replay::<TwoRecv>(info, &h).unwrap();
+        let out: (i64, i64) =
+            serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            out,
+            (1, 2),
+            "the Nth recv pops the Nth buffered signal of that name"
+        );
+    }
+
+    // Signal-or-timeout: race an "approve" signal (biased winner) against a sleep.
+    // The interleaved history exercises the TimerStarted echo + SignalReceived inbound
+    // event in one replay — the spec §6.3 motivating pattern.
+    struct SignalOrTimeout;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for SignalOrTimeout {
+        type Input = u64; // timeout in ms
+        type Output = String;
+        const TYPE: &'static str = "SignalOrTimeout";
+        async fn run(ctx: Context, timeout_ms: u64) -> Result<String, Error> {
+            use futures::{select_biased, FutureExt};
+            let approvals = ctx.signal_channel::<bool>("approve");
+            let recv = approvals.recv().fuse();
+            let nap = ctx
+                .sleep(std::time::Duration::from_millis(timeout_ms))
+                .fuse();
+            futures::pin_mut!(recv, nap);
+            let out = select_biased! {
+                a = recv => if a? { "approved" } else { "rejected" },
+                _ = nap => "timed_out",
+            };
+            Ok(out.to_string())
+        }
+    }
+
+    // Replay-determinism guard for the select-biased interleaving: a run that took the
+    // signal branch live, cold-replayed from [WorkflowStarted, TimerStarted, SignalReceived],
+    // must re-emit the SAME StartTimer command (no divergence), apply the inbound signal
+    // one-per-turn, and re-take the signal branch — proving the TimerStarted *echo* is not
+    // miscounted as an applied inbound event (Inv 3/9/10, §6.2).
+    #[test]
+    fn signal_or_timeout_replays_signal_branch_deterministically() {
+        let info = Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            parent: None,
+            workflow_type: "SignalOrTimeout".into(),
+        };
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&86_400_000u64).unwrap(),
+            },
+            // The day-long timer the workflow started on turn 1 (a command echo, NOT an
+            // applied inbound event).
+            Event::TimerStarted {
+                seq: 0,
+                duration_ms: 86_400_000,
+            },
+            // The signal that resolved the biased `recv` branch.
+            Event::SignalReceived {
+                name: "approve".into(),
+                payload: serde_json::to_vec(&true).unwrap(),
+            },
+        ];
+        let outcome = cold_replay::<SignalOrTimeout>(info, &h).unwrap();
+        let out: String = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            out, "approved",
+            "the signal branch wins identically on replay"
+        );
+        assert_eq!(
+            outcome.commands,
+            vec![Command::StartTimer {
+                seq: 0,
+                duration_ms: 86_400_000
+            }],
+            "the StartTimer echo re-emits at the same seq; the signal allocates no command"
+        );
     }
 }

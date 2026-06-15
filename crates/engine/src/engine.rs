@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 
-use crate::{ExecStatus, History, NewActivityTask, NewTimer, TaskQueue, TurnCommit};
+use crate::{ExecStatus, History, NewActivityTask, NewTimer, SignalOutcome, TaskQueue, TurnCommit};
 
 /// Options for starting a workflow (spec §7.1). `id` is the dedup key.
 #[derive(Default)]
@@ -21,6 +21,28 @@ pub struct RunCompleted {
     pub workflow_id: String,
     pub status: ExecStatus,
     pub result: Option<Vec<u8>>,
+}
+
+/// Typed result of a host signal attempt (spec §6.1), so the IPC layer can forward a
+/// meaningful outcome to the frontend. `WorkflowNotFound` / `NotRunning` are the
+/// domain outcomes; `Internal` carries an unexpected backend failure.
+#[derive(Debug, thiserror::Error)]
+pub enum SignalError {
+    #[error("no workflow with that id")]
+    WorkflowNotFound,
+    #[error("workflow is not running")]
+    NotRunning,
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+/// Shared mapping from the trait-level outcome to the host-facing result.
+fn outcome_to_result(outcome: SignalOutcome) -> Result<(), SignalError> {
+    match outcome {
+        SignalOutcome::Delivered => Ok(()),
+        SignalOutcome::WorkflowNotFound => Err(SignalError::WorkflowNotFound),
+        SignalOutcome::NotRunning => Err(SignalError::NotRunning),
+    }
 }
 
 type ReplayFn = Arc<
@@ -124,6 +146,16 @@ impl Handle {
             }
         }
     }
+
+    /// Durably deliver a signal to this run (spec §6.1). Same contract as
+    /// `Engine::signal_workflow`, scoped to the handle's `workflow_id`.
+    pub async fn signal(&self, name: &str, payload: &[u8]) -> Result<(), SignalError> {
+        let outcome = self
+            .history
+            .append_signal(&self.workflow_id, name, payload)
+            .await?;
+        outcome_to_result(outcome)
+    }
 }
 
 impl Engine {
@@ -144,6 +176,22 @@ impl Engine {
             workflow_id: opts.id,
             history: self.history.clone(),
         })
+    }
+
+    /// Durably deliver a signal to a running workflow by `workflow_id` (spec §7.2).
+    /// Returns `Ok(())` only once the `SignalReceived` event is committed, so the
+    /// caller (a Tauri command) can confirm to the frontend synchronously.
+    pub async fn signal_workflow(
+        &self,
+        workflow_id: &str,
+        name: &str,
+        payload: &[u8],
+    ) -> Result<(), SignalError> {
+        let outcome = self
+            .history
+            .append_signal(workflow_id, name, payload)
+            .await?;
+        outcome_to_result(outcome)
     }
 }
 

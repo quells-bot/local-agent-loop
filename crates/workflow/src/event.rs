@@ -29,6 +29,12 @@ pub enum Event {
     TimerFired {
         seq: u64,
     },
+    /// Inbound event (spec §6): externally-injected, carries NO `seq`. Its payload
+    /// is recorded once and replayed in `event_id` order (Invariant 10).
+    SignalReceived {
+        name: String,
+        payload: Vec<u8>,
+    },
 }
 
 impl Event {
@@ -41,6 +47,7 @@ impl Event {
             Event::ActivityFailed { .. } => "ActivityFailed",
             Event::TimerStarted { .. } => "TimerStarted",
             Event::TimerFired { .. } => "TimerFired",
+            Event::SignalReceived { .. } => "SignalReceived",
         }
     }
 }
@@ -90,6 +97,14 @@ mod tests {
             "TimerStarted"
         );
         assert_eq!(Event::TimerFired { seq: 0 }.kind(), "TimerFired");
+        assert_eq!(
+            Event::SignalReceived {
+                name: "x".into(),
+                payload: vec![]
+            }
+            .kind(),
+            "SignalReceived"
+        );
     }
 
     #[test]
@@ -97,6 +112,16 @@ mod tests {
         let e = Event::ActivityFailed {
             seq: 2,
             error: activity::Error::fatal("x"),
+        };
+        let back: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(e, back);
+    }
+
+    #[test]
+    fn signal_received_round_trips_through_json() {
+        let e = Event::SignalReceived {
+            name: "approve".into(),
+            payload: b"true".to_vec(),
         };
         let back: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(e, back);

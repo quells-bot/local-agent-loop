@@ -9,6 +9,7 @@ workflow    = { path = "../workflow" }
 activity    = { path = "../activity" }
 async-trait = { workspace = true }
 anyhow      = "1"
+thiserror   = { workspace = true }
 tokio       = { workspace = true }
 uuid        = { workspace = true }
 serde       = { workspace = true }

@@ -47,6 +47,9 @@ pub use future::{ActivityFuture, TimerFuture};
 mod spawn;
 pub use spawn::SpawnHandle;
 
+mod signal;
+pub use signal::{SignalChannel, SignalRecv};
+
 mod def;
 pub use def::Definition;
 
