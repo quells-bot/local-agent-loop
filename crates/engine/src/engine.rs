@@ -203,14 +203,31 @@ impl Engine {
             parent: None,
             workflow_type: meta.workflow_type.clone(),
         };
-        let replay = self
-            .workflows
-            .get(&meta.workflow_type)
-            .ok_or_else(|| anyhow::anyhow!("unregistered workflow {}", meta.workflow_type))?
-            .clone();
+        let replay = match self.workflows.get(&meta.workflow_type) {
+            Some(r) => r.clone(),
+            None => {
+                return self
+                    .dead_letter(
+                        &run_id,
+                        &meta.workflow_id,
+                        format!("unregistered workflow {}", meta.workflow_type),
+                    )
+                    .await;
+            }
+        };
 
-        let outcome = replay(info, &events)
-            .map_err(|e| anyhow::anyhow!("nondeterminism in {}: {e}", meta.workflow_type))?;
+        let outcome = match replay(info, &events) {
+            Ok(o) => o,
+            Err(e) => {
+                return self
+                    .dead_letter(
+                        &run_id,
+                        &meta.workflow_id,
+                        format!("nondeterminism in {}: {e}", meta.workflow_type),
+                    )
+                    .await;
+            }
+        };
 
         // Persist only commands not already recorded in history.
         let mut new_events = Vec::new();
@@ -283,6 +300,39 @@ impl Engine {
                     result,
                 });
             }
+        }
+        Ok(true)
+    }
+}
+
+impl Engine {
+    /// Terminally fail a run that cannot make progress (unregistered type, replay
+    /// divergence). Commits a `Failed` turn — which clears `runnable`, so the driver
+    /// stops retrying — and fires the completion observer (spec §5.1, §14). Returns
+    /// `Ok(true)` so the caller's loop continues without the error backoff.
+    async fn dead_letter(
+        &self,
+        run_id: &str,
+        workflow_id: &str,
+        message: String,
+    ) -> anyhow::Result<bool> {
+        let err = workflow::Error::new(message);
+        let result = Some(serde_json::to_vec(&err)?);
+        let commit = TurnCommit {
+            events: Vec::new(),
+            new_tasks: Vec::new(),
+            new_timers: Vec::new(),
+            status: ExecStatus::Failed,
+            result: result.clone(),
+        };
+        self.history.commit_turn(run_id, &commit).await?;
+        if let Some(obs) = &self.observer {
+            obs(RunCompleted {
+                run_id: run_id.to_string(),
+                workflow_id: workflow_id.to_string(),
+                status: ExecStatus::Failed,
+                result,
+            });
         }
         Ok(true)
     }
