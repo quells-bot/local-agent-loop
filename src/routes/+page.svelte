@@ -1,156 +1,69 @@
 <script>
-  import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
+  import { applyCompletion } from '$lib/applyCompletion.js';
 
-  let name = $state("");
-  let greetMsg = $state("");
+  /** @type {import('$lib/applyCompletion.js').Message[]} */
+  let messages = $state([]);
+  let draft = $state('');
 
-  async function greet(event) {
-    event.preventDefault();
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsg = await invoke("greet", { name });
+  onMount(() => {
+    const unlisten = listen('run_completed', (event) => {
+      messages = applyCompletion(messages, /** @type {any} */ (event.payload));
+    });
+    return () => {
+      unlisten.then((off) => off());
+    };
+  });
+
+  async function submit() {
+    const text = draft.trim();
+    if (text === '') return;
+    const id = crypto.randomUUID();
+    messages = [...messages, { id, text, status: 'pending' }];
+    draft = '';
+    try {
+      await invoke('submit', { text, workflowId: id });
+    } catch (e) {
+      messages = messages.map((m) =>
+        m.id === id ? { ...m, status: 'error', error: String(e) } : m
+      );
+    }
   }
 </script>
 
-<main class="container">
-  <h1>Welcome to Tauri + Svelte</h1>
+<main>
+  <h1>Workflow Chat</h1>
 
-  <div class="row">
-    <a href="https://vite.dev" target="_blank">
-      <img src="/vite.svg" class="logo vite" alt="Vite Logo" />
-    </a>
-    <a href="https://tauri.app" target="_blank">
-      <img src="/tauri.svg" class="logo tauri" alt="Tauri Logo" />
-    </a>
-    <a href="https://svelte.dev" target="_blank">
-      <img src="/svelte.svg" class="logo svelte-kit" alt="SvelteKit Logo" />
-    </a>
+  <div class="transcript">
+    {#each messages as m (m.id)}
+      <div class="bubble user">{m.text}</div>
+      {#if m.status === 'pending'}
+        <div class="bubble reply pending">…</div>
+      {:else if m.status === 'done'}
+        <div class="bubble reply">{m.output}</div>
+      {:else if m.status === 'error'}
+        <div class="bubble reply error">{m.error}</div>
+      {/if}
+    {/each}
   </div>
-  <p>Click on the Tauri, Vite, and SvelteKit logos to learn more.</p>
 
-  <form class="row" onsubmit={greet}>
-    <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
-    <button type="submit">Greet</button>
+  <form onsubmit={(e) => { e.preventDefault(); submit(); }}>
+    <input placeholder="space-separated integers, e.g. 1 2 3" bind:value={draft} />
+    <button type="submit">Send</button>
   </form>
-  <p>{greetMsg}</p>
 </main>
 
 <style>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.svelte-kit:hover {
-  filter: drop-shadow(0 0 2em #ff3e00);
-}
-
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
-
+  main { max-width: 40rem; margin: 0 auto; padding: 1rem; font-family: system-ui, sans-serif; }
+  .transcript { display: flex; flex-direction: column; gap: 0.5rem; height: 60vh; overflow-y: auto; padding: 0.5rem; border: 1px solid #ddd; border-radius: 8px; }
+  .bubble { padding: 0.4rem 0.7rem; border-radius: 12px; max-width: 75%; }
+  .user { align-self: flex-end; background: #2563eb; color: white; }
+  .reply { align-self: flex-start; background: #f1f1f1; }
+  .reply.error { background: #fee2e2; color: #991b1b; }
+  .reply.pending { opacity: 0.6; }
+  form { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+  input { flex: 1; padding: 0.5rem; }
+  button { padding: 0.5rem 1rem; }
 </style>
