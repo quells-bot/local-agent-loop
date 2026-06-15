@@ -582,7 +582,7 @@ so workflow logic ports mechanically to the Go SDK.
 | `select_biased! { ... }` | `workflow.NewSelector(ctx)` + `AddReceive` / `AddFuture` (deterministic by registration order) |
 | `ctx.spawn(fut)` | `workflow.Go(ctx, fn)` |
 | `ctx.idempotency_key()` (activity) | `activity.GetInfo(ctx)` identity (`WorkflowID:ActivityID`) |
-| `ctx.patched("id")` (reserved, §14) | `workflow.GetVersion(ctx, "id", min, max)` |
+| `ctx.patched("id")` (implemented, pass 5b; §14) | `workflow.GetVersion(ctx, "id", min, max)` |
 | `A: activity::Definition` / `W: workflow::Definition` | activity / workflow registration |
 | `engine.start_workflow::<W>(..)` | `Client.ExecuteWorkflow` |
 | `engine.signal_workflow(id, name, p)` | `Client.SignalWorkflow` |
@@ -807,13 +807,20 @@ two traits compile as the only seam `persist` implements.
 ## 14. Sharp edges and future work
 
 - **Determinism enforcement** can't be fully achieved at compile time in Rust.
-  Rely on convention + the runtime divergence check (Invariant 9) + an eventual
-  `#[workflow]` lint (`workflow-macros`, pass 5). Document the contract hard.
+  Rely on convention + the runtime divergence check (Invariant 9, hardened in
+  pass 5a to catch cross-kind seq mismatches). The `#[workflow]` lint
+  (`workflow-macros`) is deferred indefinitely — Rust cannot enforce combinator
+  choice at the type level, so the runtime check plus the documented contract
+  carry it. Document the contract hard.
 - **Versioning / code change vs in-flight histories.** Changing a workflow's
   shape can break replay of running instances. For desktop iteration it's
-  acceptable to drain or abandon running workflows on code change, but leave a
-  `ctx.patched("change-id")` hook in from day one (the `GetVersion` analog) —
-  retrofitting it later is painful, and the cloud version will need it.
+  acceptable to drain or abandon running workflows on code change. The
+  `ctx.patched("change-id")` hook (the `GetVersion` analog) landed in pass 5b: a
+  seq-less, divergence-exempt `Patched` marker recorded the first time new code
+  runs the patched path live, and replayed thereafter. Its frontier rule
+  (`replaying = recorded events remain ahead`) takes the old branch while
+  replaying older history and the new branch (recording the marker) at the live
+  edge.
 - **Sticky cache vs cold replay equivalence.** Keeping live futures cached makes
   steady state cheap; cold replay is the correctness fallback. Periodically
   force-evict and assert the command stream is identical — that test (pass 5) is

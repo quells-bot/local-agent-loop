@@ -24,6 +24,15 @@ pub(crate) struct ContextInner {
     // Child workflow outcomes, keyed by the parent's StartChild command `seq` (spec
     // §5.4). Resolves `ChildFuture` exactly like `results` resolves `ActivityFuture`.
     pub(crate) child_results: RefCell<HashMap<u64, Result<Vec<u8>, crate::Error>>>,
+    // Change-version markers recorded in history (spec §14), seeded before driving so
+    // `patched` is replay-stable. A present id means the patched path was taken.
+    pub(crate) patches: RefCell<HashSet<String>>,
+    // Markers emitted this life, so `patched` requests `RecordPatch` at most once.
+    pub(crate) patches_emitted: RefCell<HashSet<String>>,
+    // Frontier flag: true while recorded one-per-turn events still remain ahead of the
+    // current replay position. The replay driver sets it each turn; `patched` reads it
+    // to tell "replaying old history" (=> false) from "live, first run" (=> record).
+    pub(crate) replaying: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -44,6 +53,9 @@ impl Context {
                 new_spawns: RefCell::new(Vec::new()),
                 signals: RefCell::new(HashMap::new()),
                 child_results: RefCell::new(HashMap::new()),
+                patches: RefCell::new(HashSet::new()),
+                patches_emitted: RefCell::new(HashSet::new()),
+                replaying: Cell::new(false), // default: live frontier (used by unit tests)
             }),
         }
     }
@@ -135,6 +147,47 @@ impl Context {
         crate::SignalChannel::new(self.inner.clone(), name.to_string())
     }
 
+    /// `workflow.GetVersion`/`Patched` analog (spec §9.1, §14). Returns whether this
+    /// run is on the patched code path for `change_id`, recording a marker the first
+    /// time new code reaches it live. Synchronous (does not block); emits at most one
+    /// `RecordPatch` per `change_id` per life. Allocates NO `seq`.
+    pub fn patched(&self, change_id: &str) -> bool {
+        // 1. Marker already recorded in history -> patched path, replay-stable.
+        if self.inner.patches.borrow().contains(change_id) {
+            return true;
+        }
+        // 2. No marker but recorded history still remains ahead -> old code wrote this
+        //    history; take the OLD branch so it re-emits what history recorded.
+        if self.inner.replaying.get() {
+            return false;
+        }
+        // 3. Caught up to the live frontier, first time here -> record the marker once.
+        if self
+            .inner
+            .patches_emitted
+            .borrow_mut()
+            .insert(change_id.to_string())
+        {
+            self.inner.commands.borrow_mut().push(Command::RecordPatch {
+                change_id: change_id.to_string(),
+            });
+        }
+        true
+    }
+
+    /// Driver/replay seeds a recorded change-version marker before driving (spec §14).
+    /// Markers carry no `seq` and resolve synchronously, so — unlike one-per-turn
+    /// completions — they are seeded up front, like recorded schedules.
+    pub fn apply_patch(&self, change_id: String) {
+        self.inner.patches.borrow_mut().insert(change_id);
+    }
+
+    /// Replay driver sets the frontier flag before each poll: true while recorded
+    /// one-per-turn events remain ahead of the current position (spec §14).
+    pub fn set_replaying(&self, replaying: bool) {
+        self.inner.replaying.set(replaying);
+    }
+
     /// Driver/replay applies one recorded inbound signal before a poll (one event per
     /// turn, spec §4.1/§6.2): push its payload onto the per-name buffer.
     pub fn apply_signal(&self, name: String, payload: Vec<u8>) {
@@ -181,5 +234,49 @@ mod tests {
         // applying a result does not by itself emit a command
         assert!(ctx.drain_commands().is_empty());
         assert_eq!(ctx.info().execution.run_id, "r");
+    }
+
+    #[test]
+    fn patched_new_execution_records_marker_and_returns_true() {
+        let ctx = Context::new(info());
+        // Fresh run, caught up to the live frontier (replaying defaults to false).
+        assert!(ctx.patched("v2"), "new execution takes the patched path");
+        let cmds = ctx.drain_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            &cmds[0],
+            Command::RecordPatch { change_id } if change_id == "v2"
+        ));
+        // Second call in the same life is idempotent: still true, no second command.
+        assert!(ctx.patched("v2"));
+        assert!(
+            ctx.drain_commands().is_empty(),
+            "marker is emitted at most once per life"
+        );
+    }
+
+    #[test]
+    fn patched_with_recorded_marker_returns_true_without_emitting() {
+        let ctx = Context::new(info());
+        ctx.apply_patch("v2".into()); // seeded from a recorded Event::Patched
+        assert!(ctx.patched("v2"));
+        assert!(
+            ctx.drain_commands().is_empty(),
+            "a recorded marker re-emits nothing on replay"
+        );
+    }
+
+    #[test]
+    fn patched_returns_false_while_replaying_older_history() {
+        let ctx = Context::new(info());
+        ctx.set_replaying(true); // recorded events still remain ahead of this point
+        assert!(
+            !ctx.patched("v2"),
+            "no marker + still replaying older history => old branch"
+        );
+        assert!(
+            ctx.drain_commands().is_empty(),
+            "the old branch records no marker"
+        );
     }
 }

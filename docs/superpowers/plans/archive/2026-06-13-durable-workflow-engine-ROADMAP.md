@@ -125,6 +125,7 @@ pub enum Command {                      // emitted by futures, drained by driver
     ScheduleActivity { seq: u64, activity_type: String, input: Vec<u8>, retry: RetryPolicy },
     StartTimer       { seq: u64, duration_ms: u64 },   // 2a (done)
     StartChild       { seq: u64, workflow_type: String, input: Vec<u8> },          // 4a (done)
+    RecordPatch      { change_id: String },            // 5b (done) — seq-less, divergence-exempt
 }                                       // derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize
 
 pub enum Event {                        // history record, applied into ctx + persisted
@@ -137,6 +138,7 @@ pub enum Event {                        // history record, applied into ctx + pe
     SignalReceived { name: String, payload: Vec<u8> },           // 3a (done)
     ChildScheduled { seq: u64, workflow_type: String, input: Vec<u8> },                // 4a (done)
     ChildCompleted { seq: u64, result: ChildResult },                                    // 4a (done)
+    Patched { change_id: String },                               // 5b (done) — seq-less marker, divergence-exempt
     // reserved: WorkflowCancelRequested
 }                                       // derive: Clone, Debug, PartialEq, Eq, Serialize, Deserialize
                                         // method: kind(&self) -> &'static str
@@ -254,8 +256,8 @@ sweeps to requeue tasks whose lease has expired.
 | 3a | Inbound-event pipeline + signal channel | §6.1–6.3, §12 | `2026-06-14-pass-3a-inbound-events-and-signal-channel.md` | done |
 | 3b | `signal_workflow` + signal-or-timeout e2e | §6.1, §7.2 | `2026-06-14-pass-3b-signal-workflow-and-e2e.md` | done |
 | 4a | Child workflows | §5.4, §9(info.parent) | `2026-06-14-pass-4a-child-workflows.md` | done |
-| 5a | Cache vs cold-replay equivalence + hardening | §12, §14 | _(JIT)_ | not yet authored |
-| 5b | `ctx.patched` + trait cleanup + macros lint | §4.2, §14, §15 | _(JIT)_ | not yet authored |
+| 5a | Cache vs cold-replay equivalence + hardening | §12, §14 | `2026-06-15-pass-5a-determinism-guard-and-divergence-hardening.md` | done |
+| 5b | `ctx.patched` + trait cleanup (macros lint deferred) | §4.2, §14, §15 | `2026-06-15-pass-5b-patched-and-trait-boundary.md` | done |
 
 ---
 

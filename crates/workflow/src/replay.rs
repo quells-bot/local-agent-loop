@@ -54,10 +54,74 @@ pub fn cold_replay<W: crate::Definition>(
         Signal(String, Vec<u8>),
         Child(u64, Result<Vec<u8>, crate::Error>),
     }
-    let mut recorded_sched: HashMap<u64, (String, Vec<u8>)> = HashMap::new();
-    let mut recorded_timer: HashMap<u64, u64> = HashMap::new(); // seq -> duration_ms
-    let mut recorded_child: HashMap<u64, (String, Vec<u8>)> = HashMap::new();
+    // One recorded command per seq, carrying its kind + payload, so the divergence
+    // check (Invariant 9) catches a *kind* mismatch (activity-vs-timer-vs-child at the
+    // same seq), not just a same-kind payload mismatch.
+    #[derive(PartialEq, Eq)]
+    enum RecordedCmd {
+        Activity {
+            activity_type: String,
+            input: Vec<u8>,
+        },
+        Timer {
+            duration_ms: u64,
+        },
+        Child {
+            workflow_type: String,
+            input: Vec<u8>,
+        },
+    }
+    impl RecordedCmd {
+        fn describe(&self) -> String {
+            match self {
+                RecordedCmd::Activity { activity_type, .. } => format!("activity {activity_type}"),
+                RecordedCmd::Timer { duration_ms } => format!("timer {duration_ms}ms"),
+                RecordedCmd::Child { workflow_type, .. } => format!("child {workflow_type}"),
+            }
+        }
+    }
+    // Map an emitted command to (seq, RecordedCmd) for comparison. Returns None for
+    // commands that carry no seq and are divergence-exempt — `RecordPatch` (the
+    // change-version marker, like an inbound signal), handled by the `None` arm below.
+    fn as_recorded(cmd: &Command) -> Option<(u64, RecordedCmd)> {
+        match cmd {
+            Command::ScheduleActivity {
+                seq,
+                activity_type,
+                input,
+                ..
+            } => Some((
+                *seq,
+                RecordedCmd::Activity {
+                    activity_type: activity_type.clone(),
+                    input: input.clone(),
+                },
+            )),
+            Command::StartTimer { seq, duration_ms } => Some((
+                *seq,
+                RecordedCmd::Timer {
+                    duration_ms: *duration_ms,
+                },
+            )),
+            Command::StartChild {
+                seq,
+                workflow_type,
+                input,
+            } => Some((
+                *seq,
+                RecordedCmd::Child {
+                    workflow_type: workflow_type.clone(),
+                    input: input.clone(),
+                },
+            )),
+            // RecordPatch carries no seq and is divergence-exempt (spec §14, Invariant 9).
+            Command::RecordPatch { .. } => None,
+        }
+    }
+
+    let mut recorded_cmd: HashMap<u64, RecordedCmd> = HashMap::new();
     let mut applied: Vec<Applied> = Vec::new();
+    let mut recorded_patches: Vec<String> = Vec::new();
     for ev in history {
         match ev {
             Event::ActivityScheduled {
@@ -66,7 +130,13 @@ pub fn cold_replay<W: crate::Definition>(
                 input,
                 ..
             } => {
-                recorded_sched.insert(*seq, (activity_type.clone(), input.clone()));
+                recorded_cmd.insert(
+                    *seq,
+                    RecordedCmd::Activity {
+                        activity_type: activity_type.clone(),
+                        input: input.clone(),
+                    },
+                );
             }
             Event::ActivityCompleted { seq, output } => {
                 applied.push(Applied::Result(
@@ -81,7 +151,12 @@ pub fn cold_replay<W: crate::Definition>(
                 ));
             }
             Event::TimerStarted { seq, duration_ms } => {
-                recorded_timer.insert(*seq, *duration_ms);
+                recorded_cmd.insert(
+                    *seq,
+                    RecordedCmd::Timer {
+                        duration_ms: *duration_ms,
+                    },
+                );
             }
             Event::TimerFired { seq } => {
                 applied.push(Applied::Timer(*seq));
@@ -95,65 +170,54 @@ pub fn cold_replay<W: crate::Definition>(
                 workflow_type,
                 input,
             } => {
-                recorded_child.insert(*seq, (workflow_type.clone(), input.clone()));
+                recorded_cmd.insert(
+                    *seq,
+                    RecordedCmd::Child {
+                        workflow_type: workflow_type.clone(),
+                        input: input.clone(),
+                    },
+                );
             }
             Event::ChildCompleted { seq, result } => {
                 applied.push(Applied::Child(*seq, result.clone().into()));
+            }
+            // Patched carries no seq and is divergence-exempt (spec §14, Invariant 9).
+            // Markers resolve synchronously: seed up front (like recorded schedules),
+            // NOT into the one-per-turn `applied` stream.
+            Event::Patched { change_id } => {
+                recorded_patches.push(change_id.clone());
             }
         }
     }
 
     // 3. Drive the workflow, applying one item per turn.
     let mut state = WorkflowState::start::<W>(info, input);
+    for change_id in recorded_patches {
+        state.apply_patch(change_id);
+    }
     let mut commands = Vec::new();
     let mut cursor = 0usize;
     loop {
+        // Frontier: replaying == true iff recorded events still remain strictly AHEAD of
+        // the current position (cursor < applied.len()). At the live frontier
+        // (cursor == applied.len(), all recorded events consumed), replaying is false and
+        // a first-time `patched()` records the marker and takes the new branch — correct
+        // for new executions and Temporal-faithful. `patched` reads this to distinguish
+        // replaying old history (=> old branch) from the live edge (=> record the marker).
+        state.set_replaying(cursor < applied.len());
         let poll = state.poll_turn();
         for cmd in state.drain_commands() {
-            match &cmd {
-                Command::ScheduleActivity {
-                    seq,
-                    activity_type,
-                    input,
-                    ..
-                } => {
-                    if let Some((rty, rin)) = recorded_sched.get(seq) {
-                        if rty != activity_type || rin != input {
-                            return Err(Nondeterminism {
-                                seq: *seq,
-                                detail: format!(
-                                    "history recorded schedule of {rty}, workflow emitted {activity_type}"
-                                ),
-                            });
-                        }
-                    }
-                }
-                Command::StartTimer { seq, duration_ms } => {
-                    if let Some(rdur) = recorded_timer.get(seq) {
-                        if rdur != duration_ms {
-                            return Err(Nondeterminism {
-                                seq: *seq,
-                                detail: format!(
-                                    "history recorded timer of {rdur}ms, workflow emitted {duration_ms}ms"
-                                ),
-                            });
-                        }
-                    }
-                }
-                Command::StartChild {
-                    seq,
-                    workflow_type,
-                    input,
-                } => {
-                    if let Some((rty, rin)) = recorded_child.get(seq) {
-                        if rty != workflow_type || rin != input {
-                            return Err(Nondeterminism {
-                                seq: *seq,
-                                detail: format!(
-                                    "history recorded child {rty}, workflow emitted {workflow_type}"
-                                ),
-                            });
-                        }
+            if let Some((seq, emitted)) = as_recorded(&cmd) {
+                if let Some(rec) = recorded_cmd.get(&seq) {
+                    if *rec != emitted {
+                        return Err(Nondeterminism {
+                            seq,
+                            detail: format!(
+                                "history recorded {} at seq {seq}, workflow emitted {}",
+                                rec.describe(),
+                                emitted.describe()
+                            ),
+                        });
                     }
                 }
             }
@@ -899,5 +963,311 @@ mod tests {
         let err = cold_replay::<Parent>(parent_info(), &h).unwrap_err();
         assert_eq!(err.seq, 0);
         assert!(err.detail.contains("Other"));
+    }
+
+    #[test]
+    fn detects_kind_divergence_activity_recorded_timer_in_history() {
+        // History recorded a TIMER at seq 0, but Sum emits an ACTIVITY at seq 0.
+        // Pre-hardening this was silent (the activity map had no seq-0 entry).
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::TimerStarted {
+                seq: 0,
+                duration_ms: 500,
+            },
+        ];
+        let err = cold_replay::<Sum>(info(), &h).unwrap_err();
+        assert_eq!(err.seq, 0);
+        assert!(
+            err.detail.contains("timer") && err.detail.contains("activity"),
+            "detail should name both the recorded kind and the emitted kind, got: {}",
+            err.detail
+        );
+    }
+
+    #[test]
+    fn detects_kind_divergence_child_emitted_activity_recorded() {
+        // History recorded an ACTIVITY at seq 0, but Parent emits a CHILD at seq 0.
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::ActivityScheduled {
+                seq: 0,
+                activity_type: "Add".into(),
+                input: add_input(1, 2),
+                retry: RetryPolicy::none(),
+            },
+        ];
+        let err = cold_replay::<Parent>(parent_info(), &h).unwrap_err();
+        assert_eq!(err.seq, 0);
+        assert!(
+            err.detail.contains("activity") && err.detail.contains("child"),
+            "detail should name both the recorded kind and the emitted kind, got: {}",
+            err.detail
+        );
+    }
+
+    // --- Pass 5b: ctx.patched() replay tests ----------------------------------
+
+    // A workflow that branches on a patch. New code path returns 1; old path returns 0.
+    struct Branch;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for Branch {
+        type Input = ();
+        type Output = i64;
+        const TYPE: &'static str = "Branch";
+        async fn run(ctx: Context, _i: ()) -> Result<i64, Error> {
+            if ctx.patched("v2") {
+                Ok(1)
+            } else {
+                Ok(0)
+            }
+        }
+    }
+
+    fn branch_info() -> Info {
+        Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            parent: None,
+            workflow_type: "Branch".into(),
+        }
+    }
+
+    // Activity-then-patch: old history recorded the activity AND its completion, so at
+    // the moment patched() is reached on replay, a recorded event still remains ahead.
+    struct ActThenBranch;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for ActThenBranch {
+        type Input = ();
+        type Output = i64;
+        const TYPE: &'static str = "ActThenBranch";
+        async fn run(ctx: Context, _i: ()) -> Result<i64, Error> {
+            let a = ctx.activity::<Add>((1, 1)).await?; // seq 0
+            if ctx.patched("v2") {
+                Ok(a + 100) // new branch
+            } else {
+                Ok(a) // old branch
+            }
+        }
+    }
+
+    fn act_then_branch_info() -> Info {
+        Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            parent: None,
+            workflow_type: "ActThenBranch".into(),
+        }
+    }
+
+    // activity seq0; then patched. NEW branch returns a+100. OLD branch runs a SECOND
+    // activity (seq1) and returns a+b — i.e. what pre-patch code did. Pre-patch history
+    // therefore has a recorded event (seq1) AHEAD of the patched point.
+    struct ActPatchAct;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for ActPatchAct {
+        type Input = ();
+        type Output = i64;
+        const TYPE: &'static str = "ActPatchAct";
+        async fn run(ctx: Context, _i: ()) -> Result<i64, Error> {
+            let a = ctx.activity::<Add>((1, 1)).await?; // seq 0
+            if ctx.patched("v2") {
+                Ok(a + 100) // new branch
+            } else {
+                let b = ctx.activity::<Add>((3, 3)).await?; // seq 1 (pre-patch behavior)
+                Ok(a + b)
+            }
+        }
+    }
+
+    fn act_patch_act_info() -> Info {
+        Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            parent: None,
+            workflow_type: "ActPatchAct".into(),
+        }
+    }
+
+    #[test]
+    fn patched_new_execution_emits_marker_and_takes_new_branch() {
+        // Empty history beyond WorkflowStarted: nothing to apply, so the very first
+        // poll is at the live frontier -> patched records the marker and returns true.
+        let h = vec![Event::WorkflowStarted {
+            input: serde_json::to_vec(&()).unwrap(),
+        }];
+        let outcome = cold_replay::<Branch>(branch_info(), &h).unwrap();
+        let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(out, 1, "new execution takes the patched branch");
+        assert_eq!(outcome.commands.len(), 1);
+        assert!(matches!(
+            &outcome.commands[0],
+            Command::RecordPatch { change_id } if change_id == "v2"
+        ));
+    }
+
+    #[test]
+    fn patched_replays_recorded_marker_without_re_emitting() {
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::Patched {
+                change_id: "v2".into(),
+            },
+        ];
+        let outcome = cold_replay::<Branch>(branch_info(), &h).unwrap();
+        let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(out, 1, "recorded marker -> patched branch");
+        assert!(
+            outcome.commands.is_empty(),
+            "a recorded marker re-emits no command"
+        );
+    }
+
+    #[test]
+    fn patched_takes_old_branch_when_replaying_older_history() {
+        // Pre-patch history: TWO activities (seq0, seq1) both completed. On replay with
+        // patched-bearing code, patched() is reached after seq0 resolves, but seq1's
+        // recorded events still remain AHEAD (cursor < applied.len()) -> replaying == true
+        // -> patched() == false -> old branch schedules seq1, returns a+b, no marker, no
+        // divergence.
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::ActivityScheduled {
+                seq: 0,
+                activity_type: "Add".into(),
+                input: add_input(1, 1),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityCompleted {
+                seq: 0,
+                output: serde_json::to_vec(&2i64).unwrap(),
+            },
+            Event::ActivityScheduled {
+                seq: 1,
+                activity_type: "Add".into(),
+                input: add_input(3, 3),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityCompleted {
+                seq: 1,
+                output: serde_json::to_vec(&6i64).unwrap(),
+            },
+        ];
+        let outcome = cold_replay::<ActPatchAct>(act_patch_act_info(), &h).unwrap();
+        let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            out, 8,
+            "old history with events ahead -> old branch: a=2, b=6 -> 8"
+        );
+        assert!(
+            !outcome
+                .commands
+                .iter()
+                .any(|c| matches!(c, Command::RecordPatch { .. })),
+            "old branch records no marker"
+        );
+    }
+
+    #[test]
+    fn patched_at_frontier_after_activity_records_marker_and_takes_new_branch() {
+        // New code runs an activity, then reaches patched() at the LIVE FRONTIER: seq0's
+        // completion is the LAST recorded event, so when patched() is reached nothing
+        // remains ahead (cursor == applied.len()) -> replaying == false -> first live
+        // execution -> record the marker and take the new branch. Distinguishes the
+        // correct `cursor < applied.len()` rule from a `!applied.is_empty()` mistake.
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::ActivityScheduled {
+                seq: 0,
+                activity_type: "Add".into(),
+                input: add_input(1, 1),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityCompleted {
+                seq: 0,
+                output: serde_json::to_vec(&2i64).unwrap(),
+            },
+        ];
+        let outcome = cold_replay::<ActThenBranch>(act_then_branch_info(), &h).unwrap();
+        let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(out, 102, "frontier -> new branch: a=2 -> a+100");
+        assert!(
+            outcome
+                .commands
+                .iter()
+                .any(|c| matches!(c, Command::RecordPatch { change_id } if change_id == "v2")),
+            "first live execution records the marker"
+        );
+    }
+
+    // --- Pass 5a: prefix-replay stability guard (spec §14) -------------------
+
+    /// Replaying every prefix of a history yields a command stream that only GROWS:
+    /// the stream for prefix k+1 starts with the stream for prefix k. This is the
+    /// spec §14 "force-evict at every point" determinism guard without a live cache —
+    /// evicting and cold-replaying at any history position reproduces prior commands.
+    fn assert_prefix_stable<W: crate::Definition>(info: Info, full: &[Event]) {
+        let mut prev: Vec<Command> = Vec::new();
+        for k in 1..=full.len() {
+            let outcome = cold_replay::<W>(info.clone(), &full[..k])
+                .unwrap_or_else(|e| panic!("prefix {k} diverged: {e}"));
+            assert!(
+                outcome.commands.len() >= prev.len(),
+                "prefix {k}: command stream shrank ({} < {})",
+                outcome.commands.len(),
+                prev.len()
+            );
+            assert!(
+                outcome.commands.starts_with(&prev),
+                "prefix {k}: command stream rewrote an earlier command"
+            );
+            prev = outcome.commands;
+        }
+    }
+
+    #[test]
+    fn prefix_replay_is_stable_activities() {
+        assert_prefix_stable::<Sum>(info(), &full_history());
+    }
+
+    #[test]
+    fn prefix_replay_is_stable_timer_then_activity() {
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::TimerStarted {
+                seq: 0,
+                duration_ms: 500,
+            },
+            Event::TimerFired { seq: 0 },
+            Event::ActivityScheduled {
+                seq: 1,
+                activity_type: "Add".into(),
+                input: add_input(1, 2),
+                retry: RetryPolicy::none(),
+            },
+            Event::ActivityCompleted {
+                seq: 1,
+                output: serde_json::to_vec(&3i64).unwrap(),
+            },
+        ];
+        assert_prefix_stable::<Nap>(nap_info(), &h);
     }
 }

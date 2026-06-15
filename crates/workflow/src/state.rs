@@ -102,6 +102,14 @@ impl WorkflowState {
     pub fn apply_child_result(&self, seq: u64, result: Result<Vec<u8>, crate::Error>) {
         self.ctx.apply_child_result(seq, result);
     }
+
+    pub fn apply_patch(&self, change_id: String) {
+        self.ctx.apply_patch(change_id);
+    }
+
+    pub fn set_replaying(&self, replaying: bool) {
+        self.ctx.set_replaying(replaying);
+    }
 }
 
 #[cfg(test)]
