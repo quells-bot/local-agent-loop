@@ -52,9 +52,11 @@ pub fn cold_replay<W: crate::Definition>(
         Result(u64, CommandResult),
         Timer(u64),
         Signal(String, Vec<u8>),
+        Child(u64, Result<Vec<u8>, crate::Error>),
     }
     let mut recorded_sched: HashMap<u64, (String, Vec<u8>)> = HashMap::new();
     let mut recorded_timer: HashMap<u64, u64> = HashMap::new(); // seq -> duration_ms
+    let mut recorded_child: HashMap<u64, (String, Vec<u8>)> = HashMap::new();
     let mut applied: Vec<Applied> = Vec::new();
     for ev in history {
         match ev {
@@ -88,11 +90,15 @@ pub fn cold_replay<W: crate::Definition>(
             Event::SignalReceived { name, payload } => {
                 applied.push(Applied::Signal(name.clone(), payload.clone()));
             }
-            Event::ChildScheduled { .. } => {
-                // Child divergence checked via seq matching; handled in later task.
+            Event::ChildScheduled {
+                seq,
+                workflow_type,
+                input,
+            } => {
+                recorded_child.insert(*seq, (workflow_type.clone(), input.clone()));
             }
-            Event::ChildCompleted { .. } => {
-                // Child outcome delivery mapped to parent result channels in later task.
+            Event::ChildCompleted { seq, result } => {
+                applied.push(Applied::Child(*seq, result.clone().into()));
             }
         }
     }
@@ -134,8 +140,21 @@ pub fn cold_replay<W: crate::Definition>(
                         }
                     }
                 }
-                Command::StartChild { .. } => {
-                    // Child workflow divergence checked via ChildScheduled events (spec §5.4).
+                Command::StartChild {
+                    seq,
+                    workflow_type,
+                    input,
+                } => {
+                    if let Some((rty, rin)) = recorded_child.get(seq) {
+                        if rty != workflow_type || rin != input {
+                            return Err(Nondeterminism {
+                                seq: *seq,
+                                detail: format!(
+                                    "history recorded child {rty}, workflow emitted {workflow_type}"
+                                ),
+                            });
+                        }
+                    }
                 }
             }
             commands.push(cmd);
@@ -155,6 +174,7 @@ pub fn cold_replay<W: crate::Definition>(
                         Applied::Signal(name, payload) => {
                             state.apply_signal(name.clone(), payload.clone())
                         }
+                        Applied::Child(seq, r) => state.apply_child_result(*seq, r.clone()),
                     }
                     cursor += 1;
                 } else {
@@ -770,5 +790,114 @@ mod tests {
             }],
             "the StartTimer echo re-emits at the same seq; the signal allocates no command"
         );
+    }
+
+    // --- Pass 4a: child workflows -----------------------------------------
+
+    // A child workflow: input passthrough.
+    struct Child;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for Child {
+        type Input = i64;
+        type Output = i64;
+        const TYPE: &'static str = "Child";
+        async fn run(_ctx: Context, i: i64) -> Result<i64, Error> {
+            Ok(i)
+        }
+    }
+
+    // A parent that starts one child with input 5 and returns child_output + 1.
+    struct Parent;
+    #[async_trait::async_trait(?Send)]
+    impl crate::Definition for Parent {
+        type Input = ();
+        type Output = i64;
+        const TYPE: &'static str = "Parent";
+        async fn run(ctx: Context, _i: ()) -> Result<i64, Error> {
+            let v = ctx.child_workflow::<Child>(5i64).await?;
+            Ok(v + 1)
+        }
+    }
+
+    fn parent_info() -> Info {
+        Info {
+            execution: Execution {
+                workflow_id: "w".into(),
+                run_id: "r".into(),
+            },
+            parent: None,
+            workflow_type: "Parent".into(),
+        }
+    }
+
+    #[test]
+    fn replays_child_completed_to_parent_output() {
+        // History: child scheduled, child completed with output 10 (=5*2).
+        // Parent's ChildFuture resolves to Ok(10), adds 1 -> output 11.
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::ChildScheduled {
+                seq: 0,
+                workflow_type: "Child".into(),
+                input: serde_json::to_vec(&5i64).unwrap(),
+            },
+            Event::ChildCompleted {
+                seq: 0,
+                result: crate::ChildResult::Completed(serde_json::to_vec(&10i64).unwrap()),
+            },
+        ];
+        let outcome = cold_replay::<Parent>(parent_info(), &h).unwrap();
+        let out: i64 = serde_json::from_slice(&outcome.completion.unwrap().unwrap()).unwrap();
+        assert_eq!(out, 11, "child returned 10 (=5*2); parent adds 1");
+        assert_eq!(outcome.commands.len(), 1);
+        assert!(matches!(
+            &outcome.commands[0],
+            Command::StartChild { seq: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn child_failure_propagates_to_parent_error() {
+        // History: child scheduled, child completed with Failure.
+        // Parent's ChildFuture resolves to Err, ? turns it into workflow error.
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::ChildScheduled {
+                seq: 0,
+                workflow_type: "Child".into(),
+                input: serde_json::to_vec(&5i64).unwrap(),
+            },
+            Event::ChildCompleted {
+                seq: 0,
+                result: crate::ChildResult::Failed(Error::new("child died")),
+            },
+        ];
+        let outcome = cold_replay::<Parent>(parent_info(), &h).unwrap();
+        match outcome.completion {
+            Some(Err(e)) => assert_eq!(e.message, "child died"),
+            other => panic!("expected Some(Err(child died)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detects_divergent_child_type() {
+        // History recorded a child of type "Other" at seq 0, but Parent emits "Child".
+        let h = vec![
+            Event::WorkflowStarted {
+                input: serde_json::to_vec(&()).unwrap(),
+            },
+            Event::ChildScheduled {
+                seq: 0,
+                workflow_type: "Other".into(),
+                input: serde_json::to_vec(&5i64).unwrap(),
+            },
+        ];
+        let err = cold_replay::<Parent>(parent_info(), &h).unwrap_err();
+        assert_eq!(err.seq, 0);
+        assert!(err.detail.contains("Other"));
     }
 }
