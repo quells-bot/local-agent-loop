@@ -248,6 +248,13 @@ impl Engine {
                 _ => None,
             })
             .collect();
+        let recorded_patches: HashSet<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                workflow::Event::Patched { change_id } => Some(change_id.clone()),
+                _ => None,
+            })
+            .collect();
 
         // A child run records its parent's identity so `ctx.info().parent` is correct
         // (spec §9). The parent's workflow_id comes from its own execution row.
@@ -374,6 +381,16 @@ impl Engine {
                         child_workflow_id: format!("{}::child::{}", meta.workflow_id, seq),
                         workflow_type: workflow_type.clone(),
                         input: input.clone(),
+                    });
+                }
+                workflow::Command::RecordPatch { change_id } => {
+                    // Seq-less marker: dedupe by change_id (it can only be recorded once
+                    // per run). No task/timer/child.
+                    if recorded_patches.contains(change_id) {
+                        continue;
+                    }
+                    new_events.push(workflow::Event::Patched {
+                        change_id: change_id.clone(),
                     });
                 }
             }

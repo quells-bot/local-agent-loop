@@ -15,7 +15,9 @@ fn encode(event: &Event) -> (Option<i64>, &'static str, Vec<u8>) {
         | Event::TimerFired { seq }
         | Event::ChildScheduled { seq, .. }
         | Event::ChildCompleted { seq, .. } => Some(*seq as i64),
-        Event::WorkflowStarted { .. } | Event::SignalReceived { .. } => None,
+        Event::WorkflowStarted { .. } | Event::SignalReceived { .. } | Event::Patched { .. } => {
+            None
+        }
     };
     let payload = serde_json::to_vec(event).expect("event serializes");
     (seq, event.kind(), payload)
