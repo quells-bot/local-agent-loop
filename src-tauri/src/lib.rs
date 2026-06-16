@@ -251,15 +251,17 @@ pub fn run() {
                 if event.id().as_ref() == "history" {
                     if let Some(w) = app.get_webview_window("history") {
                         let _ = w.set_focus();
-                    } else {
-                        let _ = tauri::WebviewWindowBuilder::new(
-                            app,
-                            "history",
-                            tauri::WebviewUrl::App("history".into()),
-                        )
-                        .title("Workflow History")
-                        .inner_size(900.0, 640.0)
-                        .build();
+                    } else if let Err(e) = tauri::WebviewWindowBuilder::new(
+                        app,
+                        "history",
+                        // The /history SvelteKit route is added in Task 5; until then this loads the SPA fallback.
+                        tauri::WebviewUrl::App("history".into()),
+                    )
+                    .title("Workflow History")
+                    .inner_size(900.0, 640.0)
+                    .build()
+                    {
+                        eprintln!("[history window] failed to open: {e}");
                     }
                 }
             });
