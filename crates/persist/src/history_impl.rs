@@ -744,6 +744,34 @@ mod tests {
             .find(|e| matches!(e.event, Event::ChildScheduled { .. }))
             .unwrap();
         assert_eq!(child.child_run_id.as_deref(), Some("child-run"));
+
+        // The child's terminal turn notifies the parent with ChildCompleted,
+        // which appends a ChildCompleted event to the PARENT's history. That
+        // row must also resolve its child_run_id back to the child.
+        use engine::ParentNotify;
+        let child_done = TurnCommit {
+            events: vec![],
+            new_tasks: vec![],
+            new_timers: vec![],
+            new_children: vec![],
+            parent_notify: Some(ParentNotify {
+                parent_run_id: "parent-run".into(),
+                event: Event::ChildCompleted {
+                    seq: 0,
+                    result: workflow::ChildResult::Completed(b"42".to_vec()),
+                },
+            }),
+            status: ExecStatus::Completed,
+            result: Some(b"42".to_vec()),
+        };
+        db.commit_turn("child-run", &child_done).await.unwrap();
+
+        let evs = db.read_events("parent-run").await.unwrap();
+        let completed = evs
+            .iter()
+            .find(|e| matches!(e.event, Event::ChildCompleted { .. }))
+            .unwrap();
+        assert_eq!(completed.child_run_id.as_deref(), Some("child-run"));
     }
 
     #[tokio::test]
@@ -784,6 +812,19 @@ mod tests {
         };
         db.commit_turn("run-B", &commit).await.unwrap();
 
+        // Drive run-A to a terminal Completed status so the summary exercises
+        // the ExecStatus::Completed mapping.
+        let done = TurnCommit {
+            events: vec![],
+            new_tasks: vec![],
+            new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
+            status: ExecStatus::Completed,
+            result: Some(b"\"done\"".to_vec()),
+        };
+        db.commit_turn("run-A", &done).await.unwrap();
+
         let runs = db.list_executions().await.unwrap();
         let ids: Vec<&str> = runs.iter().map(|r| r.run_id.as_str()).collect();
         assert!(ids.contains(&"run-A"));
@@ -792,6 +833,9 @@ mod tests {
 
         // newest-first: sorted by started_at descending.
         assert!(runs.windows(2).all(|w| w[0].started_at >= w[1].started_at));
+
+        let a = runs.iter().find(|r| r.run_id == "run-A").unwrap();
+        assert_eq!(a.status, ExecStatus::Completed);
 
         let b = runs.iter().find(|r| r.run_id == "run-B").unwrap();
         assert_eq!(b.workflow_type, "Parent");
