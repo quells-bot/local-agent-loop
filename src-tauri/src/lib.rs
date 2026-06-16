@@ -60,6 +60,14 @@ async fn run_detail(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("run not found: {run_id}"))?;
     let records = history.read_events(&run_id).await.map_err(|e| e.to_string())?;
+    // The run's terminal result lives on the execution row (not the event stream);
+    // decode it to generic JSON, demo-agnostic, like `completion_payload`.
+    let result = history
+        .find_execution(&meta.workflow_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .and_then(|(_, _, bytes)| bytes)
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     let started_at = records.first().map(|r| r.ts).unwrap_or(0);
     let last_event_at = records.last().map(|r| r.ts).unwrap_or(0);
     let summary = RunSummaryDto {
@@ -72,7 +80,11 @@ async fn run_detail(
         event_count: records.len() as i64,
     };
     let events = records.into_iter().map(event_to_json).collect();
-    Ok(RunDetailDto { summary, events })
+    Ok(RunDetailDto {
+        summary,
+        result,
+        events,
+    })
 }
 
 /// Map a terminal `RunCompleted` into the event payload pushed to the frontend
@@ -120,6 +132,10 @@ struct EventDto {
 #[derive(Clone, Serialize)]
 struct RunDetailDto {
     summary: RunSummaryDto,
+    /// The run's terminal output (workflow result object) or failure (`workflow::Error`),
+    /// decoded as generic JSON. `None` while the run is still `Running`. This lives on
+    /// the execution row, not in the event stream, so the viewer surfaces it here.
+    result: Option<serde_json::Value>,
     events: Vec<EventDto>,
 }
 

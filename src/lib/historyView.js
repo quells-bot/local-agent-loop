@@ -45,6 +45,42 @@ export function eventLabel(ev) {
 }
 
 /**
+ * The decoded params/result/error payload to display under a timeline row, with a
+ * short label, or `null` for events that carry none (timers, patches). `value` is
+ * the already-decoded JSON the host sent (object, scalar, or null).
+ * @param {EventDto & Record<string, any>} ev
+ * @returns {{ label: string, value: any } | null}
+ */
+export function eventPayload(ev) {
+  switch (ev.kind) {
+    case 'WorkflowStarted':
+    case 'ActivityScheduled':
+    case 'ChildScheduled':
+      return { label: 'params', value: ev.input };
+    case 'ActivityCompleted':
+      return { label: 'result', value: ev.output };
+    case 'ChildCompleted':
+      return { label: 'result', value: ev.result };
+    case 'ActivityFailed':
+      return { label: 'error', value: ev.error };
+    case 'SignalReceived':
+      return { label: 'payload', value: ev.payload };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Pretty-print a decoded JSON value for display; '' for `undefined`.
+ * @param {any} value
+ * @returns {string}
+ */
+export function formatJson(value) {
+  if (value === undefined) return '';
+  return JSON.stringify(value, null, 2);
+}
+
+/**
  * CSS modifier class for a run status.
  * @param {string} status
  * @returns {string}

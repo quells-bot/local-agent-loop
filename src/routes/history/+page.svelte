@@ -1,7 +1,15 @@
 <script>
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { eventLabel, statusClass, formatTime, pushCrumb, popTo } from '$lib/historyView.js';
+  import {
+    eventLabel,
+    eventPayload,
+    formatJson,
+    statusClass,
+    formatTime,
+    pushCrumb,
+    popTo
+  } from '$lib/historyView.js';
 
   /** @type {any[]} */
   let runs = $state([]);
@@ -100,19 +108,35 @@
           <span class="rtime">{formatTime(detail.summary.started_at)}</span>
         </div>
 
+        {#if detail.result != null}
+          <div class="payload run-result" class:is-error={detail.summary.status === 'failed'}>
+            <span class="payload-label">{detail.summary.status === 'failed' ? 'error' : 'result'}</span>
+            <pre>{formatJson(detail.result)}</pre>
+          </div>
+        {/if}
+
         <ol class="timeline">
           {#each detail.events as ev (ev.event_id)}
+            {@const payload = eventPayload(ev)}
             <li>
-              <span class="ev-time">{formatTime(ev.ts)}</span>
-              {#if ev.child_run_id}
-                <button
-                  class="ev-link"
-                  onclick={() => openRun(ev.child_run_id, ev.workflow_type ?? 'child', true)}
-                >
-                  {eventLabel(ev)} →
-                </button>
-              {:else}
-                <span class="ev-label">{eventLabel(ev)}</span>
+              <div class="ev-head">
+                {#if ev.child_run_id}
+                  <button
+                    class="ev-link"
+                    onclick={() => openRun(ev.child_run_id, ev.workflow_type ?? 'child', true)}
+                  >
+                    {eventLabel(ev)} →
+                  </button>
+                {:else}
+                  <span class="ev-label">{eventLabel(ev)}</span>
+                {/if}
+                <span class="ev-time">{formatTime(ev.ts)}</span>
+              </div>
+              {#if payload && payload.value !== undefined}
+                <div class="payload" class:is-error={payload.label === 'error'}>
+                  <span class="payload-label">{payload.label}</span>
+                  <pre>{formatJson(payload.value)}</pre>
+                </div>
               {/if}
             </li>
           {/each}
@@ -143,10 +167,17 @@
   .crumbs { display: flex; gap: 0.4rem; align-items: center; margin-bottom: 0.5rem; }
   .crumb { background: none; border: 0; color: #2563eb; cursor: pointer; padding: 0; }
   .sep { color: #999; }
-  .detail-head { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; }
+  .detail-head { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem; }
   .timeline { list-style: none; margin: 0; padding: 0; }
-  .timeline li { display: flex; gap: 0.5rem; align-items: baseline; padding: 0.3rem 0; border-bottom: 1px solid #f0f0f0; }
+  .timeline li { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.4rem 0; border-bottom: 1px solid #f0f0f0; }
+  .ev-head { display: flex; gap: 0.5rem; align-items: baseline; }
   .ev-link { background: none; border: 0; color: #2563eb; cursor: pointer; padding: 0; text-align: left; }
+  .payload { margin-left: 1rem; }
+  .payload-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.03em; color: #666; }
+  .payload pre { margin: 0.15rem 0 0; padding: 0.4rem 0.6rem; background: #f7f7f8; border-radius: 6px;
+    font-size: 0.8rem; line-height: 1.35; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+  .payload.is-error pre { background: #fee2e2; color: #991b1b; }
+  .run-result { margin: 0 0 0.75rem; }
   .error { color: #991b1b; }
   .empty { color: #888; }
 </style>
