@@ -2,7 +2,10 @@
 // docs/superpowers/specs/2026-06-13-durable-workflow-engine-design.md
 use rusqlite::{params, OptionalExtension};
 
-use engine::{CreateOutcome, ExecStatus, History, RunMeta, SignalOutcome, StoredEvent, TurnCommit};
+use engine::{
+    CreateOutcome, ExecStatus, ExecutionSummary, History, HistoryRecord, RunMeta, SignalOutcome,
+    StoredEvent, TurnCommit,
+};
 use workflow::Event;
 
 use crate::sqlite::{now_ms, Sqlite};
@@ -241,6 +244,82 @@ impl History for Sqlite {
         }))
     }
 
+    async fn list_executions(&self) -> anyhow::Result<Vec<ExecutionSummary>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT e.run_id, e.workflow_id, e.workflow_type, e.status, \
+                    MIN(h.ts), MAX(h.ts), COUNT(h.event_id) \
+             FROM executions e JOIN history h ON h.run_id = e.run_id \
+             WHERE e.parent_run_id IS NULL \
+             GROUP BY e.run_id \
+             ORDER BY MIN(h.ts) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (run_id, workflow_id, workflow_type, status, started_at, last_event_at, event_count) =
+                row?;
+            out.push(ExecutionSummary {
+                run_id,
+                workflow_id,
+                workflow_type,
+                status: ExecStatus::from_str(&status).unwrap_or(ExecStatus::Running),
+                started_at,
+                last_event_at,
+                event_count,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn read_events(&self, run_id: &str) -> anyhow::Result<Vec<HistoryRecord>> {
+        let conn = self.conn.lock().unwrap();
+        // Collect raw rows first, dropping the prepared statement before the
+        // per-child lookups below.
+        let raw: Vec<(i64, Vec<u8>, i64)> = {
+            let mut stmt = conn.prepare(
+                "SELECT event_id, payload, ts FROM history WHERE run_id = ?1 ORDER BY event_id",
+            )?;
+            let rows = stmt.query_map(params![run_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, i64>(2)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut out = Vec::with_capacity(raw.len());
+        for (event_id, payload, ts) in raw {
+            let event: Event = serde_json::from_slice(&payload)?;
+            let child_run_id = match &event {
+                Event::ChildScheduled { seq, .. } | Event::ChildCompleted { seq, .. } => conn
+                    .query_row(
+                        "SELECT run_id FROM executions \
+                         WHERE parent_run_id = ?1 AND parent_seq = ?2",
+                        params![run_id, *seq as i64],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?,
+                _ => None,
+            };
+            out.push(HistoryRecord {
+                event_id,
+                ts,
+                event,
+                child_run_id,
+            });
+        }
+        Ok(out)
+    }
+
     async fn append_signal(
         &self,
         workflow_id: &str,
@@ -293,7 +372,7 @@ impl History for Sqlite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::{ExecStatus, NewActivityTask, SignalOutcome};
+    use engine::{ExecStatus, NewActivityTask, NewChild, SignalOutcome};
     use workflow::RetryPolicy;
 
     #[tokio::test]
@@ -598,5 +677,126 @@ mod tests {
             h.last().unwrap().event,
             Event::WorkflowStarted { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn read_events_carries_ts_in_order_without_child_ids() {
+        let db = Sqlite::open_in_memory().unwrap();
+        db.create_execution("run-1", "wf-1", "Parent", b"in")
+            .await
+            .unwrap();
+        let commit = TurnCommit {
+            events: vec![Event::ActivityScheduled {
+                seq: 0,
+                activity_type: "Parse".into(),
+                input: b"\"1 2\"".to_vec(),
+                retry: RetryPolicy::none(),
+            }],
+            new_tasks: vec![],
+            new_timers: vec![],
+            new_children: vec![],
+            parent_notify: None,
+            status: ExecStatus::Running,
+            result: None,
+        };
+        db.commit_turn("run-1", &commit).await.unwrap();
+
+        let evs = db.read_events("run-1").await.unwrap();
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0].event_id, 1);
+        assert!(matches!(evs[0].event, Event::WorkflowStarted { .. }));
+        assert_eq!(evs[1].event_id, 2);
+        assert!(matches!(evs[1].event, Event::ActivityScheduled { seq: 0, .. }));
+        assert!(evs[0].ts > 0 && evs[1].ts >= evs[0].ts);
+        assert!(evs.iter().all(|e| e.child_run_id.is_none()));
+    }
+
+    #[tokio::test]
+    async fn read_events_resolves_child_run_id_for_child_events() {
+        let db = Sqlite::open_in_memory().unwrap();
+        db.create_execution("parent-run", "parent-wf", "Parent", b"in")
+            .await
+            .unwrap();
+        let commit = TurnCommit {
+            events: vec![Event::ChildScheduled {
+                seq: 0,
+                workflow_type: "SumChild".into(),
+                input: b"[1]".to_vec(),
+            }],
+            new_tasks: vec![],
+            new_timers: vec![],
+            new_children: vec![NewChild {
+                seq: 0,
+                child_run_id: "child-run".into(),
+                child_workflow_id: "parent-wf::child::0".into(),
+                workflow_type: "SumChild".into(),
+                input: b"[1]".to_vec(),
+            }],
+            parent_notify: None,
+            status: ExecStatus::Running,
+            result: None,
+        };
+        db.commit_turn("parent-run", &commit).await.unwrap();
+
+        let evs = db.read_events("parent-run").await.unwrap();
+        let child = evs
+            .iter()
+            .find(|e| matches!(e.event, Event::ChildScheduled { .. }))
+            .unwrap();
+        assert_eq!(child.child_run_id.as_deref(), Some("child-run"));
+    }
+
+    #[tokio::test]
+    async fn read_events_empty_for_unknown_run() {
+        let db = Sqlite::open_in_memory().unwrap();
+        let evs = db.read_events("nope").await.unwrap();
+        assert!(evs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_executions_returns_roots_only() {
+        let db = Sqlite::open_in_memory().unwrap();
+        db.create_execution("run-A", "wf-A", "Parent", b"in-A")
+            .await
+            .unwrap();
+        db.create_execution("run-B", "wf-B", "Parent", b"in-B")
+            .await
+            .unwrap();
+        // run-B spawns a child; the child must NOT appear in the list.
+        let commit = TurnCommit {
+            events: vec![Event::ChildScheduled {
+                seq: 0,
+                workflow_type: "SumChild".into(),
+                input: b"[1]".to_vec(),
+            }],
+            new_tasks: vec![],
+            new_timers: vec![],
+            new_children: vec![NewChild {
+                seq: 0,
+                child_run_id: "child-run".into(),
+                child_workflow_id: "wf-B::child::0".into(),
+                workflow_type: "SumChild".into(),
+                input: b"[1]".to_vec(),
+            }],
+            parent_notify: None,
+            status: ExecStatus::Running,
+            result: None,
+        };
+        db.commit_turn("run-B", &commit).await.unwrap();
+
+        let runs = db.list_executions().await.unwrap();
+        let ids: Vec<&str> = runs.iter().map(|r| r.run_id.as_str()).collect();
+        assert!(ids.contains(&"run-A"));
+        assert!(ids.contains(&"run-B"));
+        assert!(!ids.contains(&"child-run"), "children are not roots");
+
+        // newest-first: sorted by started_at descending.
+        assert!(runs.windows(2).all(|w| w[0].started_at >= w[1].started_at));
+
+        let b = runs.iter().find(|r| r.run_id == "run-B").unwrap();
+        assert_eq!(b.workflow_type, "Parent");
+        assert_eq!(b.status, ExecStatus::Running);
+        assert_eq!(b.event_count, 2); // WorkflowStarted + ChildScheduled
+        assert!(b.started_at <= b.last_event_at);
     }
 }
