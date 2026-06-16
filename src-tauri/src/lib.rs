@@ -8,6 +8,7 @@ use workflow::{ChildResult, Event};
 use persist::Sqlite;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
+use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
 use demo::{Parent, ParentParams, Parse, SumActivity, SumChild};
 
@@ -236,6 +237,33 @@ pub fn run() {
             app.manage(engine);
             // Expose the read model to the history viewer commands.
             app.manage(history);
+
+            // "View ▸ Workflow History…" opens a second window at /history.
+            let history_item =
+                MenuItemBuilder::with_id("history", "Workflow History…").build(app)?;
+            let view_menu = SubmenuBuilder::new(app, "View")
+                .item(&history_item)
+                .build()?;
+            let menu = MenuBuilder::new(app).item(&view_menu).build()?;
+            app.set_menu(menu)?;
+
+            app.on_menu_event(move |app, event| {
+                if event.id().as_ref() == "history" {
+                    if let Some(w) = app.get_webview_window("history") {
+                        let _ = w.set_focus();
+                    } else {
+                        let _ = tauri::WebviewWindowBuilder::new(
+                            app,
+                            "history",
+                            tauri::WebviewUrl::App("history".into()),
+                        )
+                        .title("Workflow History")
+                        .inner_size(900.0, 640.0)
+                        .build();
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![submit, list_runs, run_detail])
