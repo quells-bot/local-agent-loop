@@ -24,3 +24,6 @@ engine     = { path = "../crates/engine" }
 persist    = { path = "../crates/persist" }
 demo       = { path = "../crates/demo" }
 workflow   = { path = "../crates/workflow" }
+
+[dev-dependencies]
+activity = { path = "../crates/activity" }
