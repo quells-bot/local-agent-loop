@@ -25,8 +25,10 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell Vite to ignore watching `src-tauri` and the Cargo build output.
+      //    `target/` holds thousands of files (e.g. `cargo doc` HTML), and
+      //    watching them exhausts the inotify limit (ENOSPC).
+      ignored: ["**/src-tauri/**", "**/target/**"],
     },
   },
 }));
