@@ -345,4 +345,26 @@ mod tests {
             .unwrap()
             .contains("two"));
     }
+
+    #[test]
+    fn event_to_json_humanizes_child_completed_result() {
+        let dto = event_to_json(record(
+            5,
+            Event::ChildCompleted {
+                seq: 0,
+                result: ChildResult::Completed(
+                    serde_json::to_vec(&json!({ "total": 6 })).unwrap(),
+                ),
+            },
+            None,
+        ));
+        assert_eq!(dto.kind, "ChildCompleted");
+        assert_eq!(dto.detail["result"]["status"], "completed");
+        assert_eq!(dto.detail["result"]["output"], json!({ "total": 6 }));
+    }
+
+    #[test]
+    fn decode_falls_back_to_null_for_non_json() {
+        assert_eq!(decode(b"not-json"), serde_json::Value::Null);
+    }
 }
