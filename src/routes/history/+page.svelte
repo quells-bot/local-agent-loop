@@ -3,7 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { eventLabel, statusClass, formatTime, pushCrumb, popTo } from '$lib/historyView.js';
 
-  /** @type {import('$lib/applyCompletion.js').Message[] | any[]} */
+  /** @type {any[]} */
   let runs = $state([]);
   /** @type {any} */
   let detail = $state(null);
@@ -35,10 +35,10 @@
   /** @param {number} i */
   async function gotoCrumb(i) {
     const c = crumbs[i];
-    crumbs = popTo(crumbs, i);
     try {
       detail = await invoke('run_detail', { runId: c.run_id });
       detailError = '';
+      crumbs = popTo(crumbs, i);
     } catch (e) {
       detailError = String(e);
     }
