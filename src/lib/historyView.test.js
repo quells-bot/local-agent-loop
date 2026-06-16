@@ -17,6 +17,16 @@ describe('eventLabel', () => {
   it('falls back to the raw kind for unknown events', () => {
     expect(eventLabel({ kind: 'Mystery' })).toBe('Mystery');
   });
+
+  it('labels a timer-started row with duration and seq', () => {
+    expect(eventLabel({ kind: 'TimerStarted', duration_ms: 500, seq: 2 })).toBe(
+      'Timer started: 500ms (#2)'
+    );
+  });
+
+  it('labels a patched row with change_id', () => {
+    expect(eventLabel({ kind: 'Patched', change_id: 'my-change' })).toBe('Patched: my-change');
+  });
 });
 
 describe('statusClass', () => {
