@@ -254,7 +254,7 @@ pub fn run() {
                     } else if let Err(e) = tauri::WebviewWindowBuilder::new(
                         app,
                         "history",
-                        // The /history SvelteKit route is added in Task 5; until then this loads the SPA fallback.
+                        // Loads the /history SvelteKit route (via the adapter-static SPA fallback).
                         tauri::WebviewUrl::App("history".into()),
                     )
                     .title("Workflow History")
