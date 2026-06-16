@@ -1,6 +1,7 @@
 // Spec references below ("§N", "spec §N") point to the 2026-06-13 design spec: docs/superpowers/specs/2026-06-13-durable-workflow-engine-design.md
 use crate::{
-    ActivityLease, CreateOutcome, ExecStatus, RunMeta, SignalOutcome, StoredEvent, TurnCommit,
+    ActivityLease, CreateOutcome, ExecStatus, ExecutionSummary, HistoryRecord, RunMeta,
+    SignalOutcome, StoredEvent, TurnCommit,
 };
 use workflow::CommandResult;
 
@@ -51,6 +52,17 @@ pub trait History: Send + Sync {
         &self,
         workflow_id: &str,
     ) -> anyhow::Result<Option<(String, ExecStatus, Option<Vec<u8>>)>>;
+
+    /// Read model for the history viewer (history-viewer design §4.2). NOT part of
+    /// the exactly-once boundary: the engine never calls these. They ride on
+    /// `History` because they are history-store reads, keeping the migration seam
+    /// at two traits. Root executions only (`parent_run_id IS NULL`), newest first.
+    async fn list_executions(&self) -> anyhow::Result<Vec<ExecutionSummary>>;
+
+    /// Read model for the history viewer: all events for a run in `event_id` order,
+    /// carrying timestamps. For `ChildScheduled`/`ChildCompleted`, resolves the
+    /// child's run_id from `executions`. NOT used by replay.
+    async fn read_events(&self, run_id: &str) -> anyhow::Result<Vec<HistoryRecord>>;
 }
 
 /// Work queue: activity tasks, timers (later), and the runnable set (spec §15).

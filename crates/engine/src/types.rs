@@ -121,3 +121,29 @@ pub struct RunMeta {
     pub parent_run_id: Option<String>,
     pub parent_seq: Option<i64>,
 }
+
+/// Read-model summary of one root run for the history viewer (history-viewer
+/// design §4.1). NOT part of the exactly-once boundary. `started_at` /
+/// `last_event_at` / `event_count` are derived from the run's `history` rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionSummary {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_type: String,
+    pub status: ExecStatus,
+    pub started_at: i64,    // epoch ms — min(history.ts)
+    pub last_event_at: i64, // epoch ms — max(history.ts)
+    pub event_count: i64,
+}
+
+/// Read-model row of a run's timeline (history-viewer design §4.1). The viewer
+/// analog of `StoredEvent`, but carries `ts` and a resolved `child_run_id` for
+/// `ChildScheduled`/`ChildCompleted`. Deliberately distinct from `StoredEvent`
+/// so the determinism/replay path is untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryRecord {
+    pub event_id: i64,
+    pub ts: i64, // epoch ms (history.ts)
+    pub event: Event,
+    pub child_run_id: Option<String>,
+}

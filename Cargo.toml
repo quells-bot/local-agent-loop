@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "src-tauri"]
+# A bare `cargo build`/`cargo test` stays on the engine crates; the Tauri host is
+# built explicitly via `cargo build -p app` / `cargo tauri`.
+default-members = ["crates/*"]
 
 [workspace.dependencies]
 serde       = { version = "1", features = ["derive"] }
