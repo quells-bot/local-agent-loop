@@ -3,9 +3,8 @@
 **Status:** Approved design, ready for an implementation plan.
 
 **Prerequisite:** [Activity Dependency Injection](2026-06-17-activity-dependency-injection-design.md)
-(STUB). This feature injects clients/config into activity *instances*; that engine
-change must land (or be brainstormed alongside) before chat is implemented. If it
-is deferred, chat falls back to config-via-activity-input as an interim measure.
+(approved design). This feature injects clients/config into activity *instances*;
+that engine change must land before chat is implemented.
 
 ## Goal
 
