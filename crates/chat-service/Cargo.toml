@@ -1,0 +1,9 @@
+[package]
+name = "chat-service"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rusqlite = { workspace = true }
+serde    = { workspace = true }
