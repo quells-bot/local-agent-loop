@@ -10,7 +10,12 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
-use demo::{Parent, ParentParams, Parse, SumActivity, SumChild};
+use chat::{ChatSession, ChatSessionParams, LlmComplete, RecordMessage};
+use chat_service::{ChatMessage, Client as ChatClient};
+
+/// Local llama.cpp endpoint and model (chat spec). Host constants for now.
+const LLM_BASE_URL: &str = "http://mss1.quells.house:8080";
+const LLM_MODEL: &str = "Qwen3.6-35B-A3B-MTP-GGUF";
 
 /// Pushed to the frontend after a run reaches a terminal status (spec §7.3).
 /// `result` is decoded as a generic JSON value so this host stays demo-agnostic:
@@ -24,18 +29,60 @@ struct CompletionPayload {
     result: Option<serde_json::Value>,
 }
 
-/// Start the parse→sum workflow for `text`, deduped by the frontend-supplied
-/// `workflow_id` (spec §7.1). Returns the run_id.
+/// Open a fresh chat session: start the long-lived `ChatSession` workflow, deduped
+/// by the frontend-supplied `conversation_id` (also the workflow id).
 #[tauri::command]
-async fn submit(
-    text: String,
-    workflow_id: String,
+async fn open_chat(
+    conversation_id: String,
     engine: State<'_, Arc<Engine>>,
-) -> Result<String, String> {
+) -> Result<(), String> {
     engine
-        .start_workflow::<Parent>(ParentParams { text }, StartOptions { id: workflow_id })
+        .start_workflow::<ChatSession>(
+            ChatSessionParams { conversation_id: conversation_id.clone() },
+            StartOptions { id: conversation_id },
+        )
         .await
-        .map(|h| h.run_id().to_string())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Deliver a user message to the session as a durable `"message"` signal.
+#[tauri::command]
+async fn send_message(
+    conversation_id: String,
+    message_id: String,
+    text: String,
+    engine: State<'_, Arc<Engine>>,
+) -> Result<(), String> {
+    let payload = serde_json::to_vec(
+        &serde_json::json!({ "message_id": message_id, "text": text }),
+    )
+    .map_err(|e| e.to_string())?;
+    engine
+        .signal_workflow(&conversation_id, "message", &payload)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Read the transcript for a conversation from the chat service (frontend poll).
+#[tauri::command]
+async fn chat_history(
+    conversation_id: String,
+    chat: State<'_, ChatClient>,
+) -> Result<Vec<ChatMessageDto>, String> {
+    let msgs = chat.list_messages(&conversation_id).map_err(|e| e.to_string())?;
+    Ok(msgs.into_iter().map(message_dto).collect())
+}
+
+/// Terminate the session via a durable `"stop"` signal (window closing).
+#[tauri::command]
+async fn close_chat(
+    conversation_id: String,
+    engine: State<'_, Arc<Engine>>,
+) -> Result<(), String> {
+    engine
+        .signal_workflow(&conversation_id, "stop", b"{}")
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -139,6 +186,29 @@ struct RunDetailDto {
     events: Vec<EventDto>,
 }
 
+/// One chat-history row sent to the frontend poll. `created_at` is dropped — the
+/// frontend orders by `seq` and renders by role/content/status.
+#[derive(Clone, Serialize)]
+struct ChatMessageDto {
+    message_id: String,
+    role: String,
+    content: String,
+    status: String,
+    seq: i64,
+}
+
+/// Map a service `ChatMessage` to the frontend DTO. Free function so it is
+/// unit-testable without a running Tauri app (mirrors `completion_payload`).
+fn message_dto(m: ChatMessage) -> ChatMessageDto {
+    ChatMessageDto {
+        message_id: m.message_id,
+        role: m.role,
+        content: m.content,
+        status: m.status,
+        seq: m.seq,
+    }
+}
+
 fn summary_dto(s: ExecutionSummary) -> RunSummaryDto {
     RunSummaryDto {
         run_id: s.run_id,
@@ -227,10 +297,21 @@ pub fn run() {
             let history: Arc<dyn History> = Arc::new(db.clone());
             let queue: Arc<dyn TaskQueue> = Arc::new(db.clone());
             let mut engine = Engine::new(history.clone(), queue);
-            engine.register_workflow::<Parent>();
-            engine.register_workflow::<SumChild>();
-            engine.register_activity(Parse);
-            engine.register_activity(SumActivity);
+            // Mock chat service in its own DB (separate from workflows.db).
+            let chat_db_path = dir.join("chat-service.db");
+            let chat = ChatClient::open(
+                chat_db_path.to_str().expect("utf-8 chat db path"),
+            )
+            .expect("open chat-service db");
+
+            engine.register_workflow::<ChatSession>();
+            engine.register_activity(RecordMessage::new(chat.clone()));
+            engine.register_activity(LlmComplete::new(
+                chat.clone(),
+                reqwest::Client::new(),
+                LLM_BASE_URL.into(),
+                LLM_MODEL.into(),
+            ));
 
             // Push terminal completions to the frontend (spec §7.3).
             let app_handle = app.handle().clone();
@@ -253,6 +334,8 @@ pub fn run() {
             app.manage(engine);
             // Expose the read model to the history viewer commands.
             app.manage(history);
+            // Expose the chat-service client to the `chat_history` read command.
+            app.manage(chat);
 
             // "View ▸ Workflow History…" opens a second window at /history.
             let history_item =
@@ -284,7 +367,14 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![submit, list_runs, run_detail])
+        .invoke_handler(tauri::generate_handler![
+            open_chat,
+            send_message,
+            chat_history,
+            close_chat,
+            list_runs,
+            run_detail
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -412,5 +502,23 @@ mod tests {
     #[test]
     fn decode_falls_back_to_null_for_non_json() {
         assert_eq!(decode(b"not-json"), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn message_dto_maps_service_fields() {
+        let dto = message_dto(chat_service::ChatMessage {
+            conversation_id: "c1".into(),
+            message_id: "m1".into(),
+            role: "user".into(),
+            content: "hello".into(),
+            status: "complete".into(),
+            seq: 1,
+            created_at: 0,
+        });
+        assert_eq!(dto.message_id, "m1");
+        assert_eq!(dto.role, "user");
+        assert_eq!(dto.content, "hello");
+        assert_eq!(dto.status, "complete");
+        assert_eq!(dto.seq, 1);
     }
 }

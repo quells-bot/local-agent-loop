@@ -20,10 +20,12 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = "1"
 tokio      = { workspace = true }
-engine     = { path = "../crates/engine" }
-persist    = { path = "../crates/persist" }
-demo       = { path = "../crates/demo" }
-workflow   = { path = "../crates/workflow" }
+engine       = { path = "../crates/engine" }
+persist      = { path = "../crates/persist" }
+chat         = { path = "../crates/chat" }
+chat-service = { path = "../crates/chat-service" }
+reqwest      = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+workflow     = { path = "../crates/workflow" }
 
 [dev-dependencies]
 activity = { path = "../crates/activity" }
