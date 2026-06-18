@@ -2,8 +2,10 @@
 //! via a local llama.cpp server, recording the transcript into the mock chat
 //! service (chat spec). Replaces the integer `demo` crate.
 mod activities;
+mod session;
 mod types;
 
+pub use session::ChatSession;
 pub use activities::{
     build_request, parse_response, ChatRequest, LlmComplete, OaiMessage, RecordMessage,
 };
