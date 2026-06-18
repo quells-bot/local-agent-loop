@@ -157,15 +157,22 @@ mechanical (`A::run(...)` → `instance.run(...)`, add `&self`, add the
 `Send + Sync` bound on impls that need it, turbofish registration → by-value):
 
 - `crates/activity/src/def.rs` — the trait and its in-module `Add` test (add
-  `&self` to the test activity).
+  `&self` to the test activity; update the `Add::run(...)` call to an instance
+  call).
 - `crates/engine/src/engine.rs` — `register_activity` signature + `RunnerFn`
   construction.
 - Engine tests that register activities — inventory and update during planning.
-- `src-tauri/src/lib.rs:232` — the `Parse` / `SumActivity` registration calls.
-- `crates/demo/*` — **not migrated**; deleted by the chat feature.
+- `crates/demo/src/activities.rs` — the `Parse` and `SumActivity` impls (add
+  `&self`), plus the two in-crate unit tests calling `SumActivity::run(...)`
+  (lines ~83 and ~91), which become instance calls. The `demo` workflows
+  (`SumChild`, `Parent`) are `workflow::Definition` and unaffected.
+- `src-tauri/src/lib.rs:232` — the `Parse` / `SumActivity` registration calls
+  (`register_activity::<Parse>()` → `register_activity(Parse)`).
 
-The real blast radius is small today: the two demo activities are being removed,
-leaving the in-trait test activity and the engine/host registration sites.
+DI lands *before* the chat feature (it is a prerequisite), so the `demo` crate is
+live and must be migrated — it is **not** deleted by this change. The blast radius
+is still small and entirely mechanical: two demo activities, the in-trait test
+activity, and the engine/host registration sites.
 
 ## Relationship to the chat feature
 
