@@ -42,6 +42,7 @@ compile.
 - Modify: `crates/engine/tests/equivalence.rs` (impl line 16; register line 55)
 - Modify: `crates/demo/tests/flow.rs` (registers lines 13, 14)
 - Modify: `src-tauri/src/lib.rs:232-233` (registers)
+- Modify: `crates/workflow/src/future.rs`, `crates/workflow/src/state.rs`, `crates/workflow/src/replay.rs` — `#[cfg(test)]` `activity::Definition for Add` impls; add `&self` (same mechanical change as the engine test activities).
 
 **Interfaces:**
 - Consumes: existing `engine::{Engine, History, TaskQueue, StartOptions}`, `persist::Sqlite`, `activity::{Definition, Context, Error}`, `workflow::{Definition, Context}` (all already public).
@@ -305,6 +306,7 @@ git add crates/activity/src/def.rs crates/engine/src/engine.rs crates/engine/tes
         crates/engine/tests/end_to_end.rs crates/engine/tests/concurrency.rs \
         crates/engine/tests/children.rs crates/engine/tests/timers.rs \
         crates/engine/tests/hardening.rs crates/engine/tests/equivalence.rs \
+        crates/workflow/src/future.rs crates/workflow/src/state.rs crates/workflow/src/replay.rs \
         src-tauri/src/lib.rs
 git commit -m "feat(activity): instance-based activities with dependency injection
 
