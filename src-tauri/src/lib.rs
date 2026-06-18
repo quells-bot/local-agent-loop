@@ -306,9 +306,14 @@ pub fn run() {
 
             engine.register_workflow::<ChatSession>();
             engine.register_activity(RecordMessage::new(chat.clone()));
+            let http_client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("reqwest client");
+
             engine.register_activity(LlmComplete::new(
                 chat.clone(),
-                reqwest::Client::new(),
+                http_client,
                 LLM_BASE_URL.into(),
                 LLM_MODEL.into(),
             ));

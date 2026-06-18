@@ -60,11 +60,10 @@
       status: 'complete',
       seq: Number.MAX_SAFE_INTEGER
     };
-    draft = '';
     try {
       await invoke('send_message', { conversationId, messageId, text });
+      draft = '';
     } catch (e) {
-      // surface the failure as a transient note; the input unlocks on next poll
       console.error('send_message failed', e);
     }
   }
