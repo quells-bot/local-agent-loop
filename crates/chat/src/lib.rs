@@ -4,7 +4,9 @@
 mod activities;
 mod types;
 
-pub use activities::RecordMessage;
+pub use activities::{
+    build_request, parse_response, ChatRequest, LlmComplete, OaiMessage, RecordMessage,
+};
 pub use types::{
     ChatSessionParams, ChatSessionResult, LlmParams, LlmResult, RecordResult, StopSignal,
     UserMessage,
