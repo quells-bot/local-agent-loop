@@ -181,7 +181,7 @@ mod tests {
         type Input = (i64, i64);
         type Output = i64;
         const TYPE: &'static str = "Add";
-        async fn run(_c: activity::Context, i: (i64, i64)) -> Result<i64, Error> {
+        async fn run(&self, _c: activity::Context, i: (i64, i64)) -> Result<i64, Error> {
             Ok(i.0 + i.1)
         }
     }

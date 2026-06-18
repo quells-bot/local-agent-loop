@@ -11,7 +11,7 @@ impl activity::Definition for Double {
     type Input = i64;
     type Output = i64;
     const TYPE: &'static str = "Double";
-    async fn run(_c: activity::Context, n: i64) -> Result<i64, activity::Error> {
+    async fn run(&self, _c: activity::Context, n: i64) -> Result<i64, activity::Error> {
         Ok(n * 2)
     }
 }
@@ -104,7 +104,7 @@ fn build(db: &Sqlite) -> Engine {
     e.register_workflow::<ParentIdChild>();
     e.register_workflow::<ParentOfFail>();
     e.register_workflow::<FailChild>();
-    e.register_activity::<Double>();
+    e.register_activity(Double);
     e
 }
 

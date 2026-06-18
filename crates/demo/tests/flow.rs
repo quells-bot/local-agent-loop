@@ -10,8 +10,8 @@ fn build(db: &Sqlite) -> Engine {
     let mut e = Engine::new(h, q);
     e.register_workflow::<Parent>();
     e.register_workflow::<SumChild>();
-    e.register_activity::<Parse>();
-    e.register_activity::<SumActivity>();
+    e.register_activity(Parse);
+    e.register_activity(SumActivity);
     e
 }
 

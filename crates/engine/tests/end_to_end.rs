@@ -10,7 +10,7 @@ impl activity::Definition for Add {
     type Input = (i64, i64);
     type Output = i64;
     const TYPE: &'static str = "Add";
-    async fn run(_c: activity::Context, i: (i64, i64)) -> Result<i64, activity::Error> {
+    async fn run(&self, _c: activity::Context, i: (i64, i64)) -> Result<i64, activity::Error> {
         Ok(i.0 + i.1)
     }
 }
@@ -34,7 +34,7 @@ fn build(db: &Sqlite) -> Engine {
     let q: Arc<dyn engine::TaskQueue> = Arc::new(db.clone());
     let mut e = Engine::new(h, q);
     e.register_workflow::<Sum>();
-    e.register_activity::<Add>();
+    e.register_activity(Add);
     e
 }
 

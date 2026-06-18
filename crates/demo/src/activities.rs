@@ -19,7 +19,7 @@ impl Definition for Parse {
     type Input = ParseParams;
     type Output = ParseResult;
     const TYPE: &'static str = "Parse";
-    async fn run(_ctx: Context, params: ParseParams) -> Result<ParseResult, Error> {
+    async fn run(&self, _ctx: Context, params: ParseParams) -> Result<ParseResult, Error> {
         let values = parse_ints(&params.text).map_err(Error::fatal)?;
         Ok(ParseResult { values })
     }
@@ -32,7 +32,7 @@ impl Definition for SumActivity {
     type Input = SumParams;
     type Output = SumResult;
     const TYPE: &'static str = "Sum";
-    async fn run(_ctx: Context, params: SumParams) -> Result<SumResult, Error> {
+    async fn run(&self, _ctx: Context, params: SumParams) -> Result<SumResult, Error> {
         Ok(SumResult {
             total: params.values.iter().sum(),
         })
@@ -80,7 +80,7 @@ mod tests {
 
     #[tokio::test]
     async fn sum_activity_totals_values() {
-        let out = SumActivity::run(test_ctx(), SumParams { values: vec![1, 2, 3] })
+        let out = SumActivity.run(test_ctx(), SumParams { values: vec![1, 2, 3] })
             .await
             .unwrap();
         assert_eq!(out, SumResult { total: 6 });
@@ -88,7 +88,7 @@ mod tests {
 
     #[tokio::test]
     async fn sum_activity_empty_is_zero() {
-        let out = SumActivity::run(test_ctx(), SumParams { values: vec![] })
+        let out = SumActivity.run(test_ctx(), SumParams { values: vec![] })
             .await
             .unwrap();
         assert_eq!(out, SumResult { total: 0 });

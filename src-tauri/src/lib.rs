@@ -229,8 +229,8 @@ pub fn run() {
             let mut engine = Engine::new(history.clone(), queue);
             engine.register_workflow::<Parent>();
             engine.register_workflow::<SumChild>();
-            engine.register_activity::<Parse>();
-            engine.register_activity::<SumActivity>();
+            engine.register_activity(Parse);
+            engine.register_activity(SumActivity);
 
             // Push terminal completions to the frontend (spec §7.3).
             let app_handle = app.handle().clone();

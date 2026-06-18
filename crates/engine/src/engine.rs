@@ -100,15 +100,17 @@ impl Engine {
         );
     }
 
-    pub fn register_activity<A: activity::Definition>(&mut self) {
+    pub fn register_activity<A: activity::Definition>(&mut self, instance: A) {
+        let inst = Arc::new(instance);
         self.activities.insert(
             A::TYPE.to_string(),
-            Arc::new(|ctx, bytes| {
+            Arc::new(move |ctx, bytes| {
+                let inst = inst.clone();
                 Box::pin(async move {
                     let input: A::Input = serde_json::from_slice(&bytes).map_err(|e| {
                         activity::Error::fatal(format!("activity input deserialize: {e}"))
                     })?;
-                    let out = A::run(ctx, input).await?;
+                    let out = inst.run(ctx, input).await?;
                     serde_json::to_vec(&out).map_err(|e| {
                         activity::Error::fatal(format!("activity output serialize: {e}"))
                     })

@@ -11,7 +11,7 @@ impl activity::Definition for Add {
     type Input = (i64, i64);
     type Output = i64;
     const TYPE: &'static str = "Add";
-    async fn run(_c: activity::Context, i: (i64, i64)) -> Result<i64, activity::Error> {
+    async fn run(&self, _c: activity::Context, i: (i64, i64)) -> Result<i64, activity::Error> {
         Ok(i.0 + i.1)
     }
 }
@@ -50,7 +50,7 @@ fn engine_with<W: workflow::Definition>(db: &Sqlite) -> Engine {
     let q: Arc<dyn engine::TaskQueue> = Arc::new(db.clone());
     let mut e = Engine::new(h, q);
     e.register_workflow::<W>();
-    e.register_activity::<Add>();
+    e.register_activity(Add);
     e
 }
 
@@ -67,7 +67,7 @@ async fn unregistered_workflow_is_dead_lettered() {
     let h: Arc<dyn History> = Arc::new(db.clone());
     let q: Arc<dyn engine::TaskQueue> = Arc::new(db.clone());
     let mut engine = Engine::new(h, q);
-    engine.register_activity::<Add>(); // deliberately no register_workflow
+    engine.register_activity(Add); // deliberately no register_workflow
 
     let fired = Arc::new(AtomicBool::new(false));
     let f = fired.clone();
