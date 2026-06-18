@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { awaitingReply, mergeOptimistic } from './chat.js';
 
+/** @type {(id: string, content: string) => import('./chat.js').ServiceMessage} */
 const user = (id, content) => ({ message_id: id, role: 'user', content, status: 'complete', seq: 0 });
+/** @type {(id: string, content: string, status?: 'complete'|'error') => import('./chat.js').ServiceMessage} */
 const assistant = (id, content, status = 'complete') => ({
   message_id: id, role: 'assistant', content, status, seq: 0
 });
